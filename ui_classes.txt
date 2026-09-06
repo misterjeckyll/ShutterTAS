@@ -1,0 +1,80 @@
+============================================================
+SHUTTER TAS - UI CLASS DISCOVERY
+============================================================
+
+[0001] Class /Script/OnlineSubsystemUtils.QuitMatchCallbackProxy
+[0002] Class /Script/OnlineSubsystemUtils.ShowLoginUICallbackProxy
+[0003] Class /Script/UMG.Widget
+[0004] Class /Script/CoreUObject.UInt16Property
+[0005] Class /Script/CoreUObject.UInt32Property
+[0006] Class /Script/CoreUObject.UInt64Property
+[0007] Class /Script/SlateCore.SlateWidgetStyleAsset
+[0008] Class /Script/SlateCore.SlateWidgetStyleContainerBase
+[0009] Class /Script/SlateCore.SlateWidgetStyleContainerInterface
+[0010] Class /Script/Slate.ButtonWidgetStyle
+[0011] Class /Script/Slate.CheckBoxWidgetStyle
+[0012] Class /Script/Slate.ComboBoxWidgetStyle
+[0013] Class /Script/Slate.ComboButtonWidgetStyle
+[0014] Class /Script/Slate.EditableTextBoxWidgetStyle
+[0015] Class /Script/Slate.EditableTextWidgetStyle
+[0016] Class /Script/Slate.ProgressWidgetStyle
+[0017] Class /Script/Slate.ScrollBarWidgetStyle
+[0018] Class /Script/Slate.ScrollBoxWidgetStyle
+[0019] Class /Script/Slate.SpinBoxWidgetStyle
+[0020] Class /Script/Slate.TextBlockWidgetStyle
+[0021] Class /Script/Slate.ToolMenuBase
+[0022] Class /Script/EngineSettings.HudSettings
+[0023] Class /Script/HeadMountedDisplay.XRLoadingScreenFunctionLibrary
+[0024] Class /Script/BuildPatchServices.BuildPatchManifest
+[0025] Class /Script/MovieScene.MovieSceneBuiltInEasingFunction
+[0026] Class /Script/UMG.PanelWidget
+[0027] Class /Script/UMG.ContentWidget
+[0028] Class /Script/UMG.MenuAnchor
+[0029] Class /Script/UMG.MovieSceneWidgetMaterialTrack
+[0030] Class /Script/UMG.TextLayoutWidget
+[0031] Class /Script/UMG.NativeWidgetHost
+[0032] Class /Script/UMG.Overlay
+[0033] Class /Script/UMG.OverlaySlot
+[0034] Class /Script/UMG.SlateAccessibleWidgetData
+[0035] Class /Script/UMG.UserWidget
+[0036] Class /Script/UMG.WidgetAnimation
+[0037] Class /Script/UMG.WidgetAnimationDelegateBinding
+[0038] Class /Script/UMG.WidgetAnimationPlayCallbackProxy
+[0039] Class /Script/UMG.WidgetBinding
+[0040] Class /Script/UMG.WidgetBlueprintGeneratedClass
+[0041] Class /Script/UMG.WidgetBlueprintLibrary
+[0042] Class /Script/UMG.WidgetComponent
+[0043] Class /Script/UMG.WidgetInteractionComponent
+[0044] Class /Script/UMG.WidgetLayoutLibrary
+[0045] Class /Script/UMG.WidgetNavigation
+[0046] Class /Script/UMG.WidgetSwitcher
+[0047] Class /Script/UMG.WidgetSwitcherSlot
+[0048] Class /Script/UMG.WidgetTree
+[0049] Class /Script/Engine.BrushBuilder
+[0050] Class /Script/Engine.HUD
+[0051] Class /Script/Engine.DebugCameraHUD
+[0052] Class /Script/Engine.GraphNodeContextMenuContext
+[0053] Class /Script/Engine.KismetGuidLibrary
+[0054] Class /Script/Engine.MapBuildDataRegistry
+[0055] Class /Script/Engine.MaterialExpressionScreenPosition
+[0056] Class /Script/Engine.ParticleModuleRequired
+[0057] Class /Script/Engine.StereoLayerShapeEquirect
+[0058] Class /Script/Engine.VirtualTextureBuilder
+[0059] Class /Script/Overlay.Overlays
+[0060] Class /Script/Overlay.BasicOverlays
+[0061] Class /Script/Overlay.LocalizedOverlays
+[0062] Class /Script/InteractiveToolsFramework.InteractiveGizmoBuilder
+[0063] Class /Script/InteractiveToolsFramework.AxisAngleGizmoBuilder
+[0064] Class /Script/InteractiveToolsFramework.AxisPositionGizmoBuilder
+[0065] Class /Script/InteractiveToolsFramework.BrushStampIndicatorBuilder
+[0066] Class /Script/InteractiveToolsFramework.InteractiveToolBuilder
+[0067] Class /Script/InteractiveToolsFramework.ClickDragToolBuilder
+[0068] Class /Script/InteractiveToolsFramework.IntervalGizmoBuilder
+[0069] Class /Script/InteractiveToolsFramework.MeshSurfacePointToolBuilder
+[0070] Class /Script/InteractiveToolsFramework.PlanePositionGizmoBuilder
+[0071] Class /Script/InteractiveToolsFramework.SingleClickToolBuilder
+[0072] Class /Script/InteractiveToolsFramework.TransformGizmoBuilder
+
+============================================================
+TOTAL: 72 UI-related classes
+============================================================

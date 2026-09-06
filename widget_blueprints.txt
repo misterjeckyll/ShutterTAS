@@ -1,0 +1,29 @@
+============================================================
+SHUTTER TAS - WIDGET BLUEPRINT CLASSES
+============================================================
+
+[0001] WidgetBlueprintGeneratedClass /Script/UMG.Default__WidgetBlueprintGeneratedClass
+[0002] WidgetBlueprintGeneratedClass /Game/UI/HUD/InteractWidget.InteractWidget_C
+[0003] WidgetBlueprintGeneratedClass /Game/UI/MainMenu/NavArrow_Widget.NavArrow_Widget_C
+[0004] WidgetBlueprintGeneratedClass /Game/UI/LoadingScreen/LoadingScreen_Widget.LoadingScreen_Widget_C
+[0005] WidgetBlueprintGeneratedClass /Game/UI/HUD/HUDWidget.HUDWidget_C
+[0006] WidgetBlueprintGeneratedClass /Game/UI/HUD/ScaleObjectWidget.ScaleObjectWidget_C
+[0007] WidgetBlueprintGeneratedClass /Game/UI/HUD/CollectibleWidget.CollectibleWidget_C
+[0008] WidgetBlueprintGeneratedClass /Game/UI/HUD/ElevatorMenu.ElevatorMenu_C
+[0009] WidgetBlueprintGeneratedClass /Game/UI/MainMenu/JournalWidget.JournalWidget_C
+[0010] WidgetBlueprintGeneratedClass /Game/UI/MainMenu/OptionsWidget.OptionsWidget_C
+[0011] WidgetBlueprintGeneratedClass /Game/UI/MainMenu/PauseMenuWidget.PauseMenuWidget_C
+[0012] WidgetBlueprintGeneratedClass /Game/UI/MainMenu/MainMenuWidget.MainMenuWidget_C
+[0013] WidgetBlueprintGeneratedClass /Game/Dialogue/Manager/SubtitleWidget.SubtitleWidget_C
+[0014] WidgetBlueprintGeneratedClass /Game/UI/HUD/TutorialWidgets/Tutorial_Jump.Tutorial_Jump_C
+[0015] WidgetBlueprintGeneratedClass /Game/UI/HUD/TutorialWidgets/Tutorial_BlueObjects.Tutorial_BlueObjects_C
+[0016] WidgetBlueprintGeneratedClass /Game/UI/HUD/ObjectCollectedWidget.ObjectCollectedWidget_C
+[0017] WidgetBlueprintGeneratedClass /Game/GameObjects/Environment/Respawn/Fade_To_Black_TP.Fade_To_Black_TP_C
+[0018] WidgetBlueprintGeneratedClass /Game/UI/HUD/TutorialWidgets/Tutorial_Run.Tutorial_Run_C
+[0019] WidgetBlueprintGeneratedClass /Game/UI/HUD/TutorialWidgets/Tutorial_Elevator.Tutorial_Elevator_C
+[0020] WidgetBlueprintGeneratedClass /Game/UI/HUD/TutorialWidgets/Tip_ProtectiveSuit.Tip_ProtectiveSuit_C
+[0021] WidgetBlueprintGeneratedClass /Game/GameObjects/Environment/Respawn/Fade_To_Black.Fade_To_Black_C
+
+============================================================
+TOTAL: 21 Widget Blueprint classes
+============================================================

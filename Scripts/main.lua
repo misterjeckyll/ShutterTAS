@@ -1,73 +1,82 @@
-local OUTPUT = "D:/SteamLibrary/steamapps/common/Shutter/Shutter/Binaries/Win64/ue4ss/Mods/ShutterTASDiscovery/player_candidates.txt"
-local function discover()
+local function log(msg)
+print("[TIME TEST] " .. tostring(msg))
+end
 
-    local file = io.open(OUTPUT, "w")
+log("==============================================")
+log("Blueprint time function test")
+log("==============================================")
 
-    if not file then
-        print("[ShutterTAS] ERROR: Could not open output")
-        return
-    end
+-- Find the current MainLevel world.
+local worlds = FindAllOf("World")
+local world = nil
 
-    file:write("=== PLAYER / CHARACTER CANDIDATES ===\n\n")
+for _, w in ipairs(worlds) do
+local ok, name = pcall(function()
+return w()
+end)
 
-    local count = 0
-
-    ForEachUObject(function(obj)
-
-        if not obj then
-            return
-        end
-
-        local name = obj:GetFullName()
-
-        -- Only objects belonging to a loaded level
-        if not string.find(name, "PersistentLevel", 1, true) then
-            return
-        end
-
-        local lower = string.lower(name)
-
-        --------------------------------------------------------
-        -- Much stricter than before.
-        --
-        -- Do NOT match generic "player", because things like
-        -- AnimationPlayer / SequenceDirector can contain it.
-        --------------------------------------------------------
-
-        local candidate =
-            string.find(lower, "character", 1, true)
-            or string.find(lower, "firstperson", 1, true)
-            or string.find(lower, "thirdperson", 1, true)
-            or string.find(lower, "pawn", 1, true)
-            or string.find(lower, "playercontroller", 1, true)
-
-        if not candidate then
-            return
-        end
-
-        count = count + 1
-
-        file:write(string.format(
-            "[%03d] %s\n",
-            count,
-            name
-        ))
-
-        print("[ShutterTAS] Candidate:")
-        print(name)
-
-    end)
-
-    file:write("\nTOTAL: " .. tostring(count) .. "\n")
-
-    file:close()
-
-    print(
-        "[ShutterTAS] Candidate discovery complete: "
-        .. tostring(count)
-    )
+if ok and name and string.find(tostring(name), "MainLevel", 1, true) then
+    world = w
+    break
+end
 
 end
 
+if not world then
+log("ERROR: MainLevel world not found")
+return
+end
 
-ExecuteWithDelay(10000, discover)
+log("World = " .. tostring(world()))
+
+-- Test 1: UWorld
+
+local ok, result = pcall(function()
+return world("GetTimeSeconds")
+end)
+
+log("UWorld")
+log(" call success = " .. tostring(ok))
+log(" result type = " .. tostring(type(result)))
+log(" result = " .. tostring(result))
+
+-- Test 2: GameplayStatics
+
+local ok2, result2 = pcall(function()
+return world(
+"/Script/Engine.GameplayStatics"
+)
+end)
+
+log("GameplayStatics")
+log(" call success = " .. tostring(ok2))
+log(" result type = " .. tostring(type(result2)))
+log(" result = " .. tostring(result2))
+
+-- Test 3: KismetSystemLibrary
+
+local ok3, result3 = pcall(function()
+return world(
+"/Script/Engine.KismetSystemLibrary"
+)
+end)
+
+log("KismetSystemLibrary")
+log(" call success = " .. tostring(ok3))
+log(" result type = " .. tostring(type(result3)))
+log(" result = " .. tostring(result3))
+
+-- Test 4: direct Lua function access
+
+local ok4, result4 = pcall(function()
+return world()
+end)
+
+log("Direct world()")
+log(" call success = " .. tostring(ok4))
+log(" result type = " .. tostring(type(result4)))
+log(" result = " .. tostring(result4))
+
+log("==============================================")
+log("END")
+log("==============================================")
