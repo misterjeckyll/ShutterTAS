@@ -17,8 +17,6 @@ TAS = {
     TextTime = nil,
     TextInput = nil,
     TextEvent = nil,
-    TextPosition = nil,
-    TextVelocity = nil,
 
     InitHandle = nil,
     TickHandle = nil,
@@ -240,34 +238,6 @@ local function create_overlay()
     )
 
     ----------------------------------------------------
-    -- POSITION
-    ----------------------------------------------------
-
-    TAS.TextPosition = create_text(
-        widget_tree,
-        panel,
-        "TAS_Position",
-        8,
-        144,
-        600,
-        22
-    )
-
-    ----------------------------------------------------
-    -- VELOCITY
-    ----------------------------------------------------
-
-    TAS.TextVelocity = create_text(
-        widget_tree,
-        panel,
-        "TAS_Velocity",
-        8,
-        178,
-        600,
-        22
-    )
-
-    ----------------------------------------------------
     -- INITIAL TEXT
     ----------------------------------------------------
 
@@ -389,10 +359,6 @@ end
 -- UPDATE EVENT
 --------------------------------------------------------
 
---------------------------------------------------------
--- UPDATE EVENT
---------------------------------------------------------
-
 local function update_event_text()
 
     if not TAS.Visible then
@@ -403,107 +369,11 @@ local function update_event_text()
         return
     end
 
-    local event = TAS.LastKey
-
-    if not event then
-        event = "idle"
-    end
-
     TAS.TextEvent:SetText(
-        FText(
-            "E " .. tostring(event)
-        )
+        FText("E idle")
     )
 end
 
---------------------------------------------------------
--- PLAYER STATE
---------------------------------------------------------
-
-local function get_player_pawn()
-
-    local controller = FindFirstOf(
-        "Shutter_PlayerController_C"
-    )
-
-    if not controller then
-        return nil
-    end
-
-    local pawn = controller.Pawn
-
-    if not pawn then
-        return nil
-    end
-
-    return pawn
-end
-
-local function update_velocity_text()
-    if not TAS.Visible then return end
-    if not TAS.TextVelocity then return end
-
-    local pawn = get_player_pawn()
-    if not pawn then return end
-
-    local ok, velocity = pcall(function()
-        return pawn:GetVelocity()
-    end)
-
-    if not ok or not velocity then return end
-
-    TAS.TextVelocity:SetText(FText(string.format(
-        "V X %.2f | Y %.2f | Z %.2f",
-        velocity.X,
-        velocity.Y,
-        velocity.Z
-    )))
-end
-
-
---------------------------------------------------------
--- UPDATE POSITION TEXT
---------------------------------------------------------
-
-local function update_position_text()
-
-    if not TAS.Visible then
-        return
-    end
-
-    if not TAS.TextPosition then
-        return
-    end
-
-    local pawn = get_player_pawn()
-
-    if not pawn then
-        return
-    end
-
-    local root = pawn.RootComponent
-
-    if not root then
-        return
-    end
-
-    local location = root.RelativeLocation
-
-    if not location then
-        return
-    end
-
-    TAS.TextPosition:SetText(
-        FText(
-            string.format(
-                "P X %.2f | Y %.2f | Z %.2f",
-                location.X,
-                location.Y,
-                location.Z
-            )
-        )
-    )
-end
 --------------------------------------------------------
 -- UPDATE HUD
 --------------------------------------------------------
@@ -518,13 +388,7 @@ local function update_hud()
     update_time_text()
     update_input_text()
     update_event_text()
-    update_position_text()
-    update_velocity_text()
 end
-
---------------------------------------------------------
--- UPDATE VELOCITY TEXT
---------------------------------------------------------
 
 --------------------------------------------------------
 -- LIVE INPUT DISPLAY
@@ -616,95 +480,6 @@ local function install_right_hook()
 end
 
 --------------------------------------------------------
--- KEY INPUT HOOKS
---------------------------------------------------------
-
-local KeyHooksInstalled = false
-
-local function make_key_callback(key_name)
-
-    return function()
-
-        TAS.LastKey = key_name
-
-        update_event_text()
-
-    end
-
-end
-
-local function install_key_hooks()
-
-    if KeyHooksInstalled then
-        return
-    end
-
-    ----------------------------------------------------
-    -- Key is the UE4SS table containing all supported
-    -- keyboard / mouse keys.
-    --
-    -- We register each key individually because
-    -- RegisterKeyBind does not have a wildcard key.
-    ----------------------------------------------------
-
-    local registered = 0
-
-    for key_name, key_code in pairs(Key) do
-
-        ------------------------------------------------
-        -- Ignore the reserved enum value.
-        ------------------------------------------------
-
-        if key_code ~= 0 then
-
-            ------------------------------------------------
-            -- F7 and F8 already have dedicated bindings.
-            ------------------------------------------------
-
-            if key_code ~= Key.F7 and key_code ~= Key.F8 then
-
-                local ok = pcall(
-                    function()
-
-                        if not IsKeyBindRegistered(key_code) then
-
-                            RegisterKeyBind(
-                                key_code,
-                                make_key_callback(key_name)
-                            )
-
-                            registered = registered + 1
-
-                        end
-
-                    end
-                )
-
-                if not ok then
-
-                    log(
-                        "Failed to register key: " ..
-                        tostring(key_name)
-                    )
-
-                end
-
-            end
-
-        end
-
-    end
-
-    KeyHooksInstalled = true
-
-    log(
-        "Key input hooks installed: " ..
-        tostring(registered)
-    )
-
-end
-
---------------------------------------------------------
 -- ENGINE FRAME
 --------------------------------------------------------
 
@@ -740,7 +515,6 @@ local function tas_tick()
     ----------------------------------------------------
 
     update_frame_text()
-    update_velocity_text()
 
     ----------------------------------------------------
     -- Time is currently static.
@@ -828,7 +602,6 @@ local function try_initialize()
 
     install_forward_hook()
     install_right_hook()
-    install_key_hooks()
 
     ----------------------------------------------------
     -- Initial display.
@@ -865,7 +638,6 @@ RegisterKeyBind(
 
                 update_frame_text()
                 update_input_text()
-                update_event_text()
 
             else
 
@@ -876,76 +648,6 @@ RegisterKeyBind(
     end
 )
 
-local function debug_vector_properties()
-    log("----------------------------------------")
-    log("VECTOR PROPERTY DEBUG")
-
-    local controller = FindFirstOf("Shutter_PlayerController_C")
-    if not controller then
-        log("No controller")
-        return
-    end
-
-    local pawn = controller.Pawn
-    if not pawn then
-        log("No pawn")
-        return
-    end
-
-    local root = pawn.RootComponent
-    if not root then
-        log("No RootComponent")
-        return
-    end
-
-    local location = root.RelativeLocation
-    local velocity = root.ComponentVelocity
-
-    log("RelativeLocation = " .. tostring(location))
-    log("  X = " .. tostring(location.X))
-    log("  Y = " .. tostring(location.Y))
-    log("  Z = " .. tostring(location.Z))
-
-    log("ComponentVelocity = " .. tostring(velocity))
-    log("  X = " .. tostring(velocity.X))
-    log("  Y = " .. tostring(velocity.Y))
-    log("  Z = " .. tostring(velocity.Z))
-
-    log("----------------------------------------")
-end
-local function debug_movement_properties()
-    log("----------------------------------------")
-    log("MOVEMENT DEBUG")
-
-    local controller = FindFirstOf("Shutter_PlayerController_C")
-    if not controller then
-        log("No controller")
-        return
-    end
-
-    local pawn = controller.Pawn
-    if not pawn then
-        log("No pawn")
-        return
-    end
-
-    log("CharacterMovement = " .. tostring(pawn.CharacterMovement))
-
-    if pawn.CharacterMovement then
-        local movement = pawn.CharacterMovement
-        local velocity = movement.Velocity
-
-        log("Movement Velocity = " .. tostring(velocity))
-
-        if velocity then
-            log("  X = " .. tostring(velocity.X))
-            log("  Y = " .. tostring(velocity.Y))
-            log("  Z = " .. tostring(velocity.Z))
-        end
-    end
-
-    log("----------------------------------------")
-end
 --------------------------------------------------------
 -- F8 DEBUG
 --------------------------------------------------------
@@ -972,7 +674,7 @@ RegisterKeyBind(
             tostring(TAS.Visible)
         )
 
-               log(
+        log(
             "Forward    = " ..
             tostring(TAS.Forward)
         )
@@ -980,21 +682,6 @@ RegisterKeyBind(
         log(
             "Right      = " ..
             tostring(TAS.Right)
-        )
-
-        log(
-            "LastKey    = " ..
-            tostring(TAS.LastKey)
-        )
-
-        log(
-            "KeyHooks   = " ..
-            tostring(KeyHooksInstalled)
-        )
-
-        log(
-            "HUD        = " ..
-            tostring(TAS.HUD)
         )
 
         log(
@@ -1048,41 +735,6 @@ RegisterKeyBind(
         )
 
         log("----------------------------------------")
-        log("----------------------------------------")
-        log("PLAYER STATE DEBUG")
-
-        local controller = FindFirstOf(
-            "Shutter_PlayerController_C"
-        )
-
-        log("Controller = " .. tostring(controller))
-
-        if controller then
-
-            local pawn = controller.Pawn
-
-            log("Pawn = " .. tostring(pawn))
-
-            if pawn then
-
-                log("Pawn FullName = " .. tostring(pawn:GetFullName()))
-
-                local root = pawn.RootComponent
-
-                log("RootComponent = " .. tostring(root))
-
-                if root then
-                    log("Root FullName = " .. tostring(root:GetFullName()))
-                end
-
-            end
-
-        end
-
-        debug_vector_properties()
-        debug_movement_properties()
-
-        
     end
 )
 
@@ -1109,5 +761,3 @@ TAS.InitHandle = LoopInGameThreadWithDelay(
         try_initialize()
     end
 )
-
-
