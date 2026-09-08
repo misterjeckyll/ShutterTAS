@@ -741,14 +741,8 @@ local function tas_tick()
 
     update_frame_text()
     update_velocity_text()
+    update_position_text()
 
-    ----------------------------------------------------
-    -- Time is currently static.
-    --
-    -- Do NOT call GetTimeSeconds().
-    ----------------------------------------------------
-
-    -- update_time_text()
 
 end
 
