@@ -115,6 +115,12 @@ TAS_CONFIG = {
     -- enregistrer depuis un monde remis).
     rec_from_reset = true,
 
+    -- N attend, apres son rechargement, le meme delai que B apres le dernier
+    -- chargement, pour que le decor anime soit au meme point. Au-dela de ce
+    -- nombre de secondes, N demarre au bout de 5 s. Build -41 : 30 s etait
+    -- trop long a l'usage ; faire F juste avant B donne un rejeu exact et rapide.
+    play_max_wait = 10,
+
     -- key_hooks : DESACTIVE, et ce n'est pas un reglage de confort.
     --
     -- Les callbacks de RegisterKeyBind s'executent sur le thread
@@ -139,7 +145,7 @@ KEY_DISPLAY_FRAMES = 30
 -- Marqueur de version : loggue au chargement et affiche par F8.
 -- A incrementer a chaque modification, pour verifier que le jeu charge
 -- bien le fichier copie et non une version restee en place.
-TAS_BUILD = "2026-09-10-36"
+TAS_BUILD = "2026-09-10-41"
 
 TAS = {
     Frame = 0,
@@ -202,6 +208,8 @@ TAS = {
     ----------------------------------------------------
     Mode = "idle",        -- "idle" | "rec" | "play"
     ModeRequest = false,  -- pose par B/N, consomme par le tick
+    SlowRequest = false,  -- pose par V / Shift+V / Ctrl+V, consomme par SLOW.gate
+    EngineFrame = 0,      -- frames moteur : cadence du HUD, qui tourne aussi en pause
     Rec = false,
     RecStart = 0,
     RecLast = false,
@@ -343,6 +351,125 @@ local CAM = {
     leaks = 0,
     ecarts = 0
 }
+
+----------------------------------------------------------
+-- RALENTI, PAUSE ET FRAME PAR FRAME (build -37)
+--
+-- Avec le pas fixe, chaque frame du monde vaut 1/140 s de jeu, quelle que
+-- soit sa duree reelle :
+--   ralenti  la frame reelle est allongee par une attente dans le tick ;
+--            chaque frame reste identique a une frame a vitesse normale ;
+--   pause    GameplayStatics:SetGamePaused. TAS.Frame et l'enregistreur
+--            s'arretent avec le monde, sinon REC et PLAY avanceraient
+--            pendant qu'il est fige ;
+--   V        depause le temps d'UNE frame du monde, puis remet en pause.
+----------------------------------------------------------
+
+local SLOW = {
+    factors = { 1, 0.5, 0.25, 0.125, 0.0625 },
+    index = 1,
+    paused = false,
+    stepping = false,   -- une frame avancee est en cours
+    last_clock = false,
+    steps = 0
+}
+
+function SLOW.set_paused(paused)
+
+    local pawn = get_player_pawn()
+
+    if not pawn then return false end
+
+    local ok, err = pcall(function()
+        StaticFindObject("/Script/Engine.Default__GameplayStatics"):SetGamePaused(pawn, paused)
+    end)
+
+    if not ok then
+        log("PAUSE impossible : " .. tostring(err))
+    end
+
+    return ok
+end
+
+-- Texte de la ligne M du HUD (la ligne E garde REC / PLAY).
+function SLOW.speed_line()
+
+    if SLOW.paused then
+        return string.format("M PAUSE | V +1 frame, %d avancees | Shift+V reprise", SLOW.steps)
+    end
+
+    local factor = SLOW.factors[SLOW.index]
+    local speed = factor == 1 and "x1" or string.format("RALENTI x1/%d", math.floor(1 / factor + 0.5))
+    local fps = DIAG.real_fps and string.format(" | %.0f fps reels", DIAG.real_fps) or ""
+
+    return string.format("M %s%s | Ctrl+V ralenti | Shift+V pause", speed, fps)
+end
+
+-- Une fois par frame moteur, avant l'enregistreur. Rend true si le monde
+-- avance pendant cette frame ; TAS.Frame et recorder_tick le suivent.
+function SLOW.gate()
+
+    local request = TAS.SlowRequest
+
+    if request then
+
+        TAS.SlowRequest = false
+
+        if request == "slow" then
+            SLOW.index = SLOW.index % #SLOW.factors + 1
+            local factor = SLOW.factors[SLOW.index]
+            SLOW.last_clock = false
+            log(string.format("RALENTI x%s : %.1f frames du monde par seconde reelle",
+                factor == 1 and "1" or ("1/" .. math.floor(1 / factor + 0.5)), 140 * factor))
+
+        elseif request == "pause" and SLOW.paused then
+            SLOW.set_paused(false)
+            SLOW.paused, SLOW.stepping = false, false
+            log(string.format("REPRISE a la frame %d", TAS.Frame))
+            return true
+
+        elseif request == "pause" or (request == "step" and not SLOW.paused) then
+            if SLOW.set_paused(true) then
+                SLOW.paused, SLOW.stepping, SLOW.steps = true, false, 0
+                log(string.format("PAUSE a la frame %d", TAS.Frame))
+            end
+            return false
+
+        elseif request == "step" then
+            if SLOW.set_paused(false) then
+                SLOW.stepping = true
+                SLOW.steps = SLOW.steps + 1
+                return true
+            end
+            return false
+        end
+    end
+
+    if SLOW.paused then
+        -- La frame avancee vient de passer : on refige le monde.
+        if SLOW.stepping then
+            SLOW.stepping = false
+            SLOW.set_paused(true)
+        end
+        return false
+    end
+
+    -- Ralenti : on attend jusqu'a la duree de frame reelle visee.
+    local factor = SLOW.factors[SLOW.index]
+
+    if factor < 1 then
+        local now = os.clock()
+        if SLOW.last_clock then
+            local deadline = SLOW.last_clock + 1 / (140 * factor)
+            while now < deadline do
+                now = os.clock()
+            end
+        end
+        SLOW.last_clock = now
+    end
+
+    return true
+end
 
 local function diag_count(name)
     local calls = DIAG.calls
@@ -745,6 +872,21 @@ local function create_overlay()
     )
 
     ----------------------------------------------------
+    -- VITESSE DU MOTEUR : ralenti, pause, fps reels
+    -- (build -40 : separee de la ligne E, qui garde REC / PLAY)
+    ----------------------------------------------------
+
+    TAS.TextSpeed = create_text(
+        widget_tree,
+        panel,
+        "TAS_Speed",
+        8,
+        348,
+        900,
+        22
+    )
+
+    ----------------------------------------------------
     -- INITIAL TEXT
     ----------------------------------------------------
 
@@ -782,6 +924,10 @@ local function create_overlay()
 
     if TAS.TextCamera then
         set_text("Camera", TAS.TextCamera, "C (en attente)")
+    end
+
+    if TAS.TextSpeed then
+        set_text("Speed", TAS.TextSpeed, "M x1")
     end
 
 
@@ -875,6 +1021,7 @@ local function reset_overlay()
     TAS.TextPosition = nil
     TAS.TextRotation = nil
     TAS.TextVelocity = nil
+    TAS.TextSpeed = nil
 
     invalidate_caches()
 
@@ -902,6 +1049,16 @@ local function update_frame_text()
                 TAS.Frame
             )
     )
+end
+
+-- Ligne M : vitesse du moteur (ralenti, pause, fps reels). Build -40.
+local function update_speed_text()
+
+    if not TAS.Visible or not TAS.TextSpeed then
+        return
+    end
+
+    set_text("Speed", TAS.TextSpeed, SLOW.speed_line())
 end
 
 --------------------------------------------------------
@@ -1918,6 +2075,7 @@ local function update_hud()
     update_rotation_text()
     update_velocity_text()
     update_camera_text()
+    update_speed_text()
 end
 
 
@@ -2142,9 +2300,14 @@ local function tas_tick()
     -- frame callback.
     ----------------------------------------------------
 
-    TAS.Frame = TAS.Frame + 1
+    TAS.EngineFrame = TAS.EngineFrame + 1
 
-    recorder_tick()
+    -- TAS.Frame compte les frames du MONDE : en pause, ni lui ni
+    -- l'enregistreur n'avancent, voir SLOW.
+    if SLOW.gate() then
+        TAS.Frame = TAS.Frame + 1
+        recorder_tick()
+    end
 
     ----------------------------------------------------
     -- Le compteur change a chaque frame, donc l'afficher a
@@ -2157,7 +2320,8 @@ local function tas_tick()
     -- l'affichage est espace.
     ----------------------------------------------------
 
-    if TAS.Frame % HUD_REFRESH_INTERVAL ~= 0 then
+    -- Cadence du HUD en frames moteur : il se met a jour aussi en pause.
+    if TAS.EngineFrame % HUD_REFRESH_INTERVAL ~= 0 then
         return
     end
 
@@ -2174,7 +2338,7 @@ local function tas_tick()
 
     -- Le temps n'a pas besoin de 7 Hz : un rafraichissement sur 4 suffit,
     -- et chaque lecture est un aller-retour Lua -> C++.
-    if TAS.Frame % (HUD_REFRESH_INTERVAL * 4) == 0 then
+    if TAS.EngineFrame % (HUD_REFRESH_INTERVAL * 4) == 0 then
         update_time_text()
     end
 
@@ -2186,6 +2350,7 @@ local function tas_tick()
     update_rotation_text()
     update_velocity_text()
     update_camera_text()
+    update_speed_text()
 
 end
 
@@ -2353,11 +2518,27 @@ local function record_value(channel, value)
         return
     end
 
+    -- Build -38 : en pause, les evenements d'axe du jeu tournent encore a
+    -- chaque frame moteur (48 appels par frame du monde mesures) et
+    -- reecrivaient la frame deja enregistree. Seules les frames ou le monde
+    -- avance comptent : marche normale, ou frame avancee par V.
+    if SLOW.paused and not SLOW.stepping then
+        return
+    end
+
     if TAS.RecLast[channel] == value then
         return
     end
 
     TAS.RecLast[channel] = value
+
+    -- Touche changee sur une frame avancee en pause : le jeu ne traite pas
+    -- les touches en pause, il a pu perdre cet appui alors que la prise le
+    -- note, et le rejeu le jouerait.
+    if SLOW.paused and channel:find("^Key") then
+        dbg("ATTENTION %s = %s sur une frame avancee en pause : le jeu a pu perdre cet appui, le rejeu risque de diverger",
+            channel, tostring(value))
+    end
 
     local frame = TAS.Frame - TAS.RecStart
     local entry = TAS.Rec.events[frame]
@@ -2502,6 +2683,56 @@ local function fire_action(fn, key_name)
     end
 
     return ok
+end
+
+-- Frame avancee par V pendant un REC en pause (build -39). Le jeu perd les
+-- appuis faits pendant la pause (mesure du build -38 : Espace note appuye a
+-- la frame 247, Keith ne saute pas en REC, saute en PLAY). On declenche donc
+-- nous-memes le changement de touche, comme le PLAY, et on le note a la
+-- frame SUIVANTE : le PLAY, qui declenche les actions avec une frame
+-- d'avance, le rejouera a cette meme frame du monde.
+local function inject_paused_keys()
+
+    local form = key_form()
+
+    if not form then return end
+
+    local controller = get_player_controller()
+
+    if not controller then return end
+
+    local target = TAS.Frame - TAS.RecStart + 1
+
+    for _, entry in ipairs(KEYS_RECORDED) do
+
+        local channel = entry[1]
+        local ok, down = pcall(form[2], controller, entry[2])
+
+        if ok and type(down) == "boolean" and TAS.RecLast[channel] ~= down then
+
+            TAS.RecLast[channel] = down
+
+            local action = ACTION_BY_KEY[channel]
+            local fn = action and (down and action.press or action.release)
+
+            if fn then
+                fire_action(fn, action.key)
+            end
+
+            local event = TAS.Rec.events[target]
+
+            if not event then
+                event = {}
+                TAS.Rec.events[target] = event
+            end
+
+            event[channel] = down
+            TAS.Rec.count = TAS.Rec.count + 1
+
+            dbg("REC %s = %s rejoue par le mod, frame avancee en pause ; note a la frame %d",
+                channel, tostring(down), target)
+        end
+    end
 end
 
 -- Touches vues avec une frame d'avance (voir replay_step).
@@ -2778,7 +3009,13 @@ local function poll_channels()
         end
     end
 
-    poll_keys()
+    -- En pause, seule une frame avancee par V arrive ici : le jeu a perdu
+    -- les appuis de la pause, le mod les rejoue.
+    if SLOW.paused then
+        inject_paused_keys()
+    else
+        poll_keys()
+    end
 end
 
 -- Pose de depart : sans elle, le rejeu part d'ailleurs et diverge.
@@ -2806,6 +3043,21 @@ local function capture_pose()
         local pitch, yaw, roll = rotator_pyr(rotation)
         if pitch then
             pose.pitch, pose.yaw, pose.roll = pitch, yaw, roll
+        end
+    end
+
+    -- Rotation de la camera, build -41 : sans elle, le rejeu attendait sur la
+    -- camera laissee par le rechargement puis la ramenait d'un coup a celle
+    -- de la prise, micro-mouvement visible au lancement du PLAY.
+    local controller = get_player_controller()
+
+    if controller then
+        local ok_c, control = pcall(function() return controller:GetControlRotation() end)
+        if ok_c then
+            local cam_pitch, cam_yaw, cam_roll = rotator_pyr(control)
+            if cam_pitch then
+                pose.cam_pitch, pose.cam_yaw, pose.cam_roll = cam_pitch, cam_yaw, cam_roll
+            end
         end
     end
 
@@ -2889,6 +3141,20 @@ local function restore_pose(pose)
     if not final or final > 0.01 then
         log(string.format("POSE : position de depart NON restauree (ecart %s) : le rejeu va diverger",
             final and string.format("%.2f", final) or "?"))
+    end
+
+    -- Camera, avec Keith : voir capture_pose.
+    if pose.cam_pitch then
+        local controller = get_player_controller()
+        if controller then
+            pcall(function()
+                controller:SetControlRotation({
+                    Pitch = pose.cam_pitch,
+                    Yaw = pose.cam_yaw,
+                    Roll = pose.cam_roll or 0
+                })
+            end)
+        end
     end
 
     -- Prises d'avant le 10/09 : pas d'etat de timeline, rien a restaurer.
@@ -3022,6 +3288,7 @@ local function save_recording(rec)
     if rec.pose then
         local parts = {}
         for _, key in ipairs({ "x", "y", "z", "pitch", "yaw", "roll",
+                               "cam_pitch", "cam_yaw", "cam_roll",
                                "tl_pos", "tl_playing", "tl_reverse", "gravity" }) do
             if rec.pose[key] then
                 parts[#parts + 1] = key .. " = " .. lua_value(rec.pose[key])
@@ -3489,6 +3756,16 @@ local function start_replay()
     TAS.ReplayWarned = {}
     TAS.PlayKeys = {}
     TAS.PlayKeyState = {}
+
+    -- Build -38 : une touche deja tenue au debut de la prise est un ETAT,
+    -- pas un appui (le jeu l'avait deja traitee, ou perdue en pause). Sans
+    -- cette base, le rejeu l'appuyait a la frame 0 : Keith sautait alors
+    -- qu'il ne l'avait pas fait en REC.
+    for channel in pairs(ACTION_BY_KEY) do
+        if rec.events[0][channel] ~= nil then
+            TAS.PlayKeys[channel] = rec.events[0][channel]
+        end
+    end
     CAM.calls, CAM.leaks, CAM.ecarts = 0, 0, 0
     CAM.frame, CAM.yaw_frame, CAM.pitch_frame = -1, -1, -1
     TAS.PlayByKeys =rec.events[0] ~= nil and rec.events[0].KeySpaceBar ~= nil
@@ -4811,6 +5088,9 @@ function time_report()
 
     local frames = TAS.Frame - DIAG.t_frame
     local fps = frames / secs
+
+    -- Ligne M du HUD : frames du monde par seconde reelle.
+    DIAG.real_fps = fps
     local pawn = get_player_pawn()
     local dt = pawn and world_delta(pawn) or nil
 
@@ -5724,7 +6004,7 @@ local RESET = {
     -- chargement ; N rejoue au meme delai s'il est dans [min, max], sinon
     -- au delai standard.
     min_offset = 300,             -- apres l'intro acceleree, soit ~250 frames
-    max_offset = 4200,            -- au-dela de 30 s, attendre n'a plus de sens
+    -- maximum : TAS_CONFIG.play_max_wait, en secondes
     pending_start = false,        -- "rec" ou "play" en attente du chargement
     start_load = false,           -- TAS.Frame du chargement qui compte
     info_count = {},
@@ -6048,6 +6328,9 @@ function world_mark_reset(source)
     -- Le chargement du niveau est l'origine qui compte : les comparaisons
     -- se font a la meme frame de jeu que la touche C apres le chargement.
     if source == "PlayerController:ClientRestart" then
+        -- Un nouveau niveau n'est pas en pause : sans ceci, TAS.Frame
+        -- resterait fige sur un monde qui tourne.
+        SLOW.paused, SLOW.stepping = false, false
         DIAG.last_load_frame = TAS.Frame
         DIAG.reset_frame = TAS.Frame
         -- Chargement provoque par F / Shift+F : on saute les cinematiques.
@@ -6332,7 +6615,8 @@ function reset_session(kind)
         -- avant B). Il joint la sauvegarde, Keith et son delai depuis le
         -- dernier chargement ; N rechargera et rejouera au meme delai.
         local since = DIAG.last_load_frame and (TAS.Frame - DIAG.last_load_frame) or nil
-        local exact = since ~= nil and since <= RESET.max_offset
+        local max_offset = (TAS_CONFIG.play_max_wait or 10) * 140
+        local exact = since ~= nil and since <= max_offset
         local offset = exact and math.max(since, RESET.min_offset) or RESET.start_offset
 
         DIAG.rec_setup = {
@@ -6688,11 +6972,31 @@ RegisterKeyBind(
     end
 )
 
--- Sonde input : meme principe, le travail est fait sur le game thread.
+-- V : frame par frame ; en marche, V met en pause. Shift+V : pause / reprise.
+-- Ctrl+V : ralenti x1 -> 1/2 -> 1/4 -> 1/8 -> 1/16. Meme principe que B/N :
+-- le callback ne fait que changer une cle existante, SLOW.gate fait le reste.
+-- L'ancienne sonde d'input sur V, diagnostic du sprint et de l'escalade
+-- termine, n'a plus de touche ; probe_start reste dans le code.
 RegisterKeyBind(
     Key.V,
     function()
-        TAS.ModeRequest = "probe"
+        TAS.SlowRequest = "step"
+    end
+)
+
+RegisterKeyBind(
+    Key.V,
+    { ModifierKey.SHIFT },
+    function()
+        TAS.SlowRequest = "pause"
+    end
+)
+
+RegisterKeyBind(
+    Key.V,
+    { ModifierKey.CONTROL },
+    function()
+        TAS.SlowRequest = "slow"
     end
 )
 
