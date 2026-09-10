@@ -1,14 +1,20 @@
 # ShutterTAS
 
-Outil de **Tool-Assisted Speedrun (TAS)** pour *Shutter*, basé sur **UE4SS**.
+Outil de **Tool-Assisted Speedrun (TAS)** pour *Shutter* sorti sur steam en 2023, basé sur **UE4SS**.
 
-Le projet permet d'ajouter progressivement des fonctionnalités de TAS au jeu, notamment la sauvegarde et le chargement d'états du jeu. La première étape du projet consiste à identifier les objets et états internes de *Shutter* afin de construire un système de sauvegarde/restauration fiable.
+Le projet permet d'ajouter progressivement des fonctionnalités de TAS au jeu.
 
 > **Statut : expérimental**
 >
 > Le projet est actuellement en phase de développement. Les fonctionnalités disponibles peuvent changer et certaines fonctions peuvent ne pas encore être implémentées.
 
 ---
+## Release notes 
+
+**10/09/2026** - Fonctionalités :
+-  HUD Positions, velocité, touches, framecount, timer interne
+-  Save state load state basique
+-  Record et lecture des touches
 
 ## Sommaire
 
@@ -18,10 +24,9 @@ Le projet permet d'ajouter progressivement des fonctionnalités de TAS au jeu, n
 - [3. Installer ShutterTAS](#3-installer-shuttertas)
 - [4. Structure des fichiers](#4-structure-des-fichiers)
 - [5. Lancer ShutterTAS](#5-lancer-shuttertas)
-- [6. Vérifier que le mod fonctionne](#6-vérifier-que-le-mod-fonctionne)
-- [7. Fichiers générés](#7-fichiers-générés)
-- [8. Dépannage](#8-dépannage)
-- [9. Développement](#9-développement)
+- [6. Fichiers générés](#6-fichiers-générés)
+- [7. Dépannage](#7-dépannage)
+- [8. Développement](#8-développement)
 
 ---
 
@@ -30,17 +35,14 @@ Le projet permet d'ajouter progressivement des fonctionnalités de TAS au jeu, n
 Vous devez avoir :
 
 - *Shutter* installé via Steam
-- une version de **UE4SS compatible avec le jeu**
 - Windows
-- accès au dossier d'installation de *Shutter*
-
-Le chemin d'installation de Steam ressemble généralement à :
+- accès au dossier d'installation de *Shutter*. Le chemin d'installation de Steam ressemble généralement à :
 
 ```text
 C:\Program Files (x86)\Steam\steamapps\common\Shutter\
+ou
+D:\SteamLibrary\steamapps\common\Shutter\
 ```
-
-Cependant, votre jeu peut être installé dans un autre dossier ou sur un autre disque.
 
 ---
 
@@ -48,7 +50,7 @@ Cependant, votre jeu peut être installé dans un autre dossier ou sur un autre 
 
 ## 1.1 Télécharger UE4SS
 
-Téléchargez une version récente de **UE4SS (UE4SS / UE4SS-RE)** compatible avec *Shutter*.
+Téléchargez la version ZDEV de **UE4SS** compatible avec *Shutter* : [zDEV-UE4SS_v3.0.1.zip](https://github.com/UE4SS-RE/RE-UE4SS/releases/download/experimental-latest/zDEV-UE4SS_v3.0.1-1127-g2bfa839f.zip)
 
 Après téléchargement, vous devriez obtenir une archive contenant notamment des fichiers tels que :
 
@@ -58,8 +60,6 @@ UE4SS-settings.ini
 dwmapi.dll
 Mods\
 ```
-
-> ⚠️ La structure exacte peut varier selon la version de UE4SS utilisée.
 
 ---
 
@@ -73,9 +73,7 @@ Dans Steam :
 4. Allez dans **Fichiers installés**.
 5. Cliquez sur **Parcourir**.
 
-Vous arrivez dans le dossier contenant l'exécutable du jeu.
-
-Vous devez identifier le dossier contenant le fichier `.exe` principal de *Shutter*.
+Vous arrivez dans le dossier contenant l'exécutable du jeu. Vous devez identifier le dossier contenant le fichier `.exe` principal de *Shutter*.
 
 ---
 
@@ -97,9 +95,7 @@ Le dossier important pour UE4SS est généralement :
 Shutter\Shutter\Binaries\Win64\
 ```
 
-Placez les fichiers nécessaires à UE4SS dans ce dossier selon la structure fournie par votre version de UE4SS.
-
-Après installation, vous devriez notamment avoir quelque chose ressemblant à :
+Placez les fichiers nécessaires à UE4SS dans ce dossier. Après installation, vous devriez notamment avoir quelque chose ressemblant à :
 
 ```text
 Win64\
@@ -118,22 +114,7 @@ Win64\
 
 Lancez **Shutter depuis Steam**.
 
-Si UE4SS est correctement chargé, il devrait créer/utiliser un dossier de mods dans le répertoire du jeu.
-
-Vous devriez pouvoir trouver une structure similaire à :
-
-```text
-Win64\
-└── Mods\
-```
-
-Selon la version de UE4SS, des fichiers supplémentaires peuvent également être créés.
-
-### Vérification avec la console UE4SS
-
-Certaines installations de UE4SS permettent d'afficher une console lorsqu'un jeu est lancé.
-
-Si elle est disponible, vous devriez voir des messages indiquant que UE4SS a été chargé.
+Si UE4SS est correctement chargé, il devrait créer/utiliser un dossier de mods dans le répertoire du jeu. Si vous avez bien utilisés la version zDEV, la console devrait s'afficher lorsque qu'un jeu est lancé.
 
 Si vous ne voyez absolument aucun signe de UE4SS, consultez la section [Dépannage](#8-dépannage).
 
@@ -146,14 +127,14 @@ Si vous ne voyez absolument aucun signe de UE4SS, consultez la section [Dépanna
 Dans le dossier `Mods` de UE4SS, créez :
 
 ```text
-ShutterTASDiscovery
+ShutterTAS
 ```
 
 La structure doit devenir :
 
 ```text
 Mods\
-└── ShutterTASDiscovery\
+└── ShutterTAS\
 ```
 
 ---
@@ -163,14 +144,14 @@ Mods\
 Le script principal doit être placé dans :
 
 ```text
-Mods\ShutterTASDiscovery\Scripts\main.lua
+Mods\ShutterTAS\Scripts\main.lua
 ```
 
 La structure complète devient :
 
 ```text
 Mods\
-└── ShutterTASDiscovery\
+└── ShutterTAS\
     └── Scripts\
         └── main.lua
 ```
@@ -188,13 +169,7 @@ Mods\mods.txt
 Ajoutez :
 
 ```text
-ShutterTASDiscovery : 1
-```
-
-Exemple :
-
-```text
-ShutterTASDiscovery : 1
+ShutterTAS : 1
 ```
 
 > La syntaxe exacte de `mods.txt` peut dépendre de la version de UE4SS. Utilisez la syntaxe présente dans le fichier `mods.txt` fourni avec votre installation.
@@ -220,83 +195,40 @@ Shutter\
                 │
                 ├── mods.txt
                 │
-                └── ShutterTASDiscovery\
+                └── ShutterTAS\
                     │
                     └── Scripts\
                         └── main.lua
 ```
 
-Les noms et fichiers supplémentaires peuvent varier selon la version de UE4SS.
-
----
-
 # 5. Lancer ShutterTAS
 
 Une fois UE4SS et le mod installés :
 
-1. Fermez complètement *Shutter* s'il est déjà lancé.
-2. Lancez *Shutter* depuis Steam.
-3. Attendez que le jeu arrive au menu ou charge une partie.
-4. UE4SS charge automatiquement `ShutterTASDiscovery`.
-5. Le script attend quelques secondes avant d'effectuer sa découverte.
+1. Lancez *Shutter* depuis Steam.
+2. Attendez que le jeu arrive au menu ou charge une partie.
+3. UE4SS charge automatiquement `ShutterTAS`.
+4. Le script attend quelques secondes avant d'effectuer sa découverte.
 
-Vous n'avez normalement **pas besoin de lancer `main.lua` manuellement**.
-
-Le chargement est effectué par UE4SS.
+Vous n'avez normalement **pas besoin de lancer `main.lua` manuellement**. Le chargement est effectué par UE4SS.
 
 ---
 
-# 6. Vérifier que le mod fonctionne
 
-Le premier script de découverte utilise :
+# 6. Fichiers générés
+
+Plusieurs scripts de découverte inclus permettent de trouver les objets unreal engine internes du jeu.
 
 ```lua
 ForEachUObject(...)
 ```
 
-pour parcourir les objets Unreal présents en mémoire.
-
-Lorsque le script fonctionne, la console UE4SS devrait afficher quelque chose ressemblant à :
-
-```text
-[ShutterTAS] Candidate:
-...
-```
-
-ou :
-
-```text
-[ShutterTAS] Runtime actor discovery complete: XX objects
-```
-
-Selon le script installé, un fichier de résultat peut également être créé dans :
-
-```text
-Mods\ShutterTASDiscovery\
-```
+Les scripts utilisent actuellement des fichiers texte pour faciliter l'analyse du jeu.
 
 Par exemple :
 
 ```text
-discovery.txt
-```
-
-ou :
-
-```text
-player_candidates.txt
-```
-
----
-
-# 7. Fichiers générés
-
-Les scripts ShutterTAS utilisent actuellement des fichiers texte pour faciliter l'analyse du jeu.
-
-Par exemple :
-
-```text
-Mods\ShutterTASDiscovery\discovery.txt
+Mods\ShutterTAS\discovery.txt
 ```
 
 Ces fichiers permettent de conserver une liste des objets Unreal trouvés pendant l'exécution.
@@ -322,7 +254,7 @@ Cette phase sert à déterminer quels objets représentent réellement l'état d
 
 ---
 
-# 8. Dépannage
+# 7. Dépannage
 
 ## UE4SS ne semble pas se charger
 
@@ -359,13 +291,13 @@ et assurez-vous que le mod est activé.
 La ligne devrait ressembler à :
 
 ```text
-ShutterTASDiscovery : 1
+ShutterTAS : 1
 ```
 
 Vérifiez également que le fichier existe bien :
 
 ```text
-Mods\ShutterTASDiscovery\Scripts\main.lua
+Mods\ShutterTAS\Scripts\main.lua
 ```
 
 ---
