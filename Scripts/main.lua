@@ -110,7 +110,7 @@ KEY_DISPLAY_FRAMES = 30
 -- Marqueur de version : loggue au chargement et affiche par F8.
 -- A incrementer a chaque modification, pour verifier que le jeu charge
 -- bien le fichier copie et non une version restee en place.
-TAS_BUILD = "2026-09-10-19"
+TAS_BUILD = "2026-09-10-21"
 
 TAS = {
     Frame = 0,
@@ -281,7 +281,9 @@ local DIAG = {
     t_wall = false,      -- mesure de vitesse, par time_report
     t_frame = 0,
     engine = false,      -- GameEngine, si le pas fixe a ete applique
-    fixed_on = false
+    fixed_on = false,
+    axis_seen = {},      -- axes demandes par le jeu via GetInputAxisValue
+    scale_last = false   -- derniers parametres de ScaleProjectedObject
 }
 
 -- Injection camera en PLAY (voir apply_camera et install_camera_hooks).
@@ -2365,6 +2367,15 @@ local ACTION_BY_KEY = {
     KeyRMB        = { key = "RightMouseButton",  press = KEITH_EVENT:format("Aim", 4) }
 }
 
+-- Evenements d'axe souris de Keith (10/09, build -21). Le redimensionnement
+-- d'un objet (molette tenue + souris haut/bas) lit la valeur passee a
+-- l'evenement LookUp/Down, pas GetInputAxisValue (mesure : le jeu n'y demande
+-- que MoveForward et MoveRight). Ces stubs d'axe, eux, se declenchent bien.
+local LOOK_EVENTS = {
+    LookUpDown = "InpAxisEvt_LookUp/Down_K2Node_InputAxisEvent_2",
+    LookLeftRight = "InpAxisEvt_LookLeft/Right_K2Node_InputAxisEvent_3"
+}
+
 -- Forme d'appel de IsInputKeyDown, resolue une seule fois.
 local function key_form()
 
@@ -2515,6 +2526,23 @@ local AXIS_BY_NAME = {
     ["MoveRight/Left"] = "MoveRight"
 }
 
+-- Axes souris (10/09, build -20) : le redimensionnement d'un objet (molette
+-- tenue + souris haut/bas) lit la souris par GetInputAxisValue, et rien ne
+-- l'enregistrait. Ils sont enregistres depuis la valeur que le jeu obtient
+-- (post-hook en REC), puis rejoues par le meme hook ; 0 si la prise n'a rien
+-- a cette frame, pour que la vraie souris ne pilote rien en PLAY.
+local AXIS_MOUSE = {
+    ["LookUp/Down"] = "LookUpDown",
+    ["LookLeft/Right"] = "LookLeftRight",
+    ["MoveMouse"] = "MoveMouse"
+}
+
+local MOUSE_CHANNELS = {}
+
+for _, channel in pairs(AXIS_MOUSE) do
+    MOUSE_CHANNELS[channel] = true
+end
+
 local AxisOverrideInstalled = false
 
 local function install_axis_override()
@@ -2526,16 +2554,32 @@ local function install_axis_override()
         RegisterHook(
             "/Script/Engine.Actor:GetInputAxisValue",
 
-            -- pre : quel axe est demande ? (hors rejeu : ne rien toucher)
+            -- pre : quel axe est demande ? REC : axes souris a enregistrer ;
+            -- PLAY : tous les axes rejoues ; repos : ne rien toucher.
             function(Context, InputAxisName)
-                if TAS.Mode ~= "play" then
-                    TAS.AxisPendingName = false
-                    return
-                end
+
+                TAS.AxisPendingName = false
+
+                if TAS.Mode == "idle" then return end
+
                 local ok_name, name = pcall(function()
                     return InputAxisName:get():ToString()
                 end)
-                TAS.AxisPendingName = ok_name and AXIS_BY_NAME[name] or false
+
+                if not ok_name or type(name) ~= "string" then return end
+
+                diag_count("AXIS:" .. name)
+
+                if not DIAG.axis_seen[name] then
+                    DIAG.axis_seen[name] = true
+                    dbg("AXE demande par le jeu : %s", name)
+                end
+
+                if TAS.Mode == "play" then
+                    TAS.AxisPendingName = AXIS_BY_NAME[name] or AXIS_MOUSE[name] or false
+                else
+                    TAS.AxisPendingName = AXIS_MOUSE[name] or false
+                end
             end,
 
             -- post : remplacer la valeur de retour
@@ -2543,14 +2587,26 @@ local function install_axis_override()
                 local channel = TAS.AxisPendingName
                 TAS.AxisPendingName = false
 
-                if not channel or TAS.Mode ~= "play" or not TAS.PlayState then
+                if not channel then return nil end
+
+                -- REC : la valeur que le jeu obtient (axes souris seulement)
+                if TAS.Mode == "rec" then
+                    local ok_rv, current = pcall(function() return ReturnValue:get() end)
+                    if ok_rv and type(current) == "number" then
+                        record_value(channel, current)
+                    end
+                    return nil
+                end
+
+                if TAS.Mode ~= "play" or not TAS.PlayState then
                     return nil
                 end
 
                 local replay = TAS.PlayState[channel]
 
                 if replay == nil then
-                    return nil
+                    if not MOUSE_CHANNELS[channel] then return nil end
+                    replay = 0
                 end
 
                 -- Mecanisme du changelog, seulement si c'est bien un nombre
@@ -3174,6 +3230,39 @@ local function stop_replay(reason)
     log("PLAY arrete (" .. reason .. ")")
 end
 
+-- PLAY : l'evenement d'axe recoit la vraie souris (0 en rejeu). On l'appelle
+-- nous-memes avec la valeur du REC. Appele avant apply_camera : le
+-- AddControllerPitchInput qu'il declenche recoit 0 (hook camera), donc la
+-- camera reste celle de la prise.
+local function replay_look()
+
+    if DIAG.look_off then return end
+
+    local pawn = get_player_pawn()
+
+    if not pawn then return end
+
+    for channel, fn in pairs(LOOK_EVENTS) do
+
+        local value = TAS.PlayState[channel]
+
+        if type(value) == "number" and value ~= 0 then
+
+            local ok, err = pcall(function() pawn[fn](pawn, value) end)
+
+            if not ok then
+                DIAG.look_off = true
+                log("Rejeu des axes souris impossible : " .. tostring(err))
+                return
+            end
+
+            if TAS.PlayKeyState and TAS.PlayKeyState.KeyMMB then
+                dbg("LOOK %s rejoue %.4f (molette tenue)", channel, value)
+            end
+        end
+    end
+end
+
 local function replay_step()
 
     local rec = TAS.Rec
@@ -3218,6 +3307,8 @@ local function replay_step()
         apply_jump()
         apply_sprint()
     end
+
+    replay_look()
 
     apply_camera(frame)
 end
@@ -3972,6 +4063,34 @@ end
 -- Fonctions natives : le 2e argument de RegisterHook est un pre-hook.
 ----------------------------------------------------------
 
+-- REC : valeur recue par les evenements d'axe souris de Keith (hook
+-- Blueprint : il tourne apres l'evenement, le parametre est lisible).
+local LookHooksInstalled = false
+
+local function install_look_hooks()
+
+    if LookHooksInstalled then return end
+    LookHooksInstalled = true
+
+    for channel, fn in pairs(LOOK_EVENTS) do
+
+        local recorded = channel
+
+        local ok, err = pcall(function()
+            RegisterHook(KEITH_CLASS .. fn, function(Context, AxisValue)
+                if TAS.Mode ~= "rec" then return nil end
+                local ok_v, value = pcall(function() return AxisValue:get() end)
+                if ok_v and type(value) == "number" then
+                    record_value(recorded, value)
+                end
+                return nil
+            end)
+        end)
+
+        log(string.format("Hook Keith %s %s", fn, ok and "installe" or ("absent : " .. tostring(err))))
+    end
+end
+
 local JumpHooksInstalled = false
 
 local function install_jump_hooks()
@@ -4200,6 +4319,27 @@ local function install_diag_hooks()
                         labels[key] = label
                     end
                     diag_count(label)
+                    return nil
+                end)
+            end)
+        elseif name == "ScaleProjectedObject" then
+
+            -- Redimensionnement : ce que la fonction recoit vraiment, a chaque
+            -- changement (REC et PLAY), pour comparer.
+            ok = pcall(function()
+                RegisterHook(path, function(Context, ...)
+                    if TAS.Mode == "idle" then return nil end
+                    diag_count(name)
+                    local parts = {}
+                    for _, param in ipairs({ ... }) do
+                        local ok_p, value = pcall(function() return param:get() end)
+                        parts[#parts + 1] = ok_p and tostring(value) or "?"
+                    end
+                    local text = table.concat(parts, ", ")
+                    if DIAG.scale_last ~= text then
+                        DIAG.scale_last = text
+                        dbg("SCALE ScaleProjectedObject(%s)", text)
+                    end
                     return nil
                 end)
             end)
@@ -5264,6 +5404,7 @@ local function try_initialize()
     install_key_hooks()
     install_axis_override()
     install_gait_hooks()
+    install_look_hooks()
     install_jump_hooks()
     install_diag_hooks()
     install_camera_hooks()
