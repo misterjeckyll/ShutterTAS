@@ -63,7 +63,8 @@ TAS_CONFIG = {
     -- Build -52 : recoupe, le micro-drift des builds -44 a -50 est corrige
     -- (voir SESSION .md). true pour une nouvelle enquete.
     -- Build -56 : recoupe, reprise validee (build -55).
-    debug_log    = false,
+    -- TEMPORAIRE build -58 : reactive pour valider le savestate (Shift+N).
+    debug_log    = true,
 
     -- Dumps par frame de l'enquete sur le saut et le sprint (AIR, FENETRE) :
     -- utiles pour une nouvelle enquete, trop couteux en temps normal.
@@ -76,7 +77,8 @@ TAS_CONFIG = {
     -- Coupe par defaut depuis le build -42 : c'est le plus couteux en jeu.
     -- Build -52 : recoupe avec debug_log.
     -- Build -56 : recoupe, reprise validee (build -55).
-    diag_trace   = false,
+    -- TEMPORAIRE build -58 : reactive pour valider le savestate (Shift+N).
+    diag_trace   = true,
 
     -- Instantane des variables de Keith toutes les N frames, en plus des
     -- evenements (saut, timeline, MovementState). Plus petit = divergence
@@ -161,7 +163,7 @@ KEY_DISPLAY_FRAMES = 30
 -- Marqueur de version : loggue au chargement et affiche par F8.
 -- A incrementer a chaque modification, pour verifier que le jeu charge
 -- bien le fichier copie et non une version restee en place.
-TAS_BUILD = "2026-09-10-56"
+TAS_BUILD = "2026-09-10-60"
 
 TAS = {
     Frame = 0,
@@ -387,7 +389,8 @@ local SLOW = {
     paused = false,
     stepping = false,   -- une frame avancee est en cours
     last_clock = false,
-    steps = 0
+    steps = 0,
+    fast = false        -- rejeu vers un savestate, Shift+N : frame visee
 }
 
 function SLOW.set_paused(paused)
@@ -409,6 +412,11 @@ end
 
 -- Texte de la ligne M du HUD (la ligne E garde REC / PLAY).
 function SLOW.speed_line()
+
+    if SLOW.fast then
+        return string.format("M VERS LE SAVESTATE -> frame %d%s", SLOW.fast,
+            DIAG.real_fps and string.format(" | %.0f fps reels", DIAG.real_fps) or "")
+    end
 
     if SLOW.paused then
         return string.format("M PAUSE | V +1 frame, %d avancees | Shift+V reprise", SLOW.steps)
@@ -3363,6 +3371,11 @@ local function save_recording(rec)
         string.format("    count = %d,", rec.count)
     }
 
+    -- Savestate, Shift+B : frame ou Shift+N ramene.
+    if rec.savestate then
+        out[#out + 1] = string.format("    savestate = %d,", rec.savestate)
+    end
+
     -- Prise faite depuis un reset : de quoi recharger le meme monde.
     if rec.save_hex then
         out[#out + 1] = string.format("    start_offset = %d,", rec.start_offset or 0)
@@ -3713,6 +3726,9 @@ local function stop_replay(reason)
     -- Rejeu fini : les actions encore en attente n'ont plus lieu d'etre.
     PENDING_ACTIONS.list = {}
 
+    -- Rejeu vers un savestate interrompu : plus de pause a poser.
+    SLOW.fast = false
+
     release_sprint()
     release_keys()
 
@@ -3803,6 +3819,15 @@ local function replay_step()
     replay_look()
 
     apply_camera(frame)
+
+    -- Savestate, Shift+N : pause juste avant la frame visee. Demandee a la
+    -- frame d'avant, SLOW.gate fige le monde au debut de la suivante : la
+    -- frame visee n'a pas encore tourne, et B la reprend.
+    if SLOW.fast and frame >= SLOW.fast - 1 then
+        log(string.format("SAVESTATE atteint : pause avant la frame %d", SLOW.fast))
+        SLOW.fast = false
+        TAS.SlowRequest = "pause"
+    end
 end
 
 ----------------------------------------------------------
@@ -3942,6 +3967,14 @@ local function start_replay()
         or "Rejeu des actions : prise sans touches, repli sur les effets")
     TAS.PlayStart = TAS.Frame
 
+    -- Shift+N : rejeu jusqu'au savestate, a 140 fps comme toujours.
+    if DIAG.goto_target then
+        SLOW.fast = math.max(1, math.min(DIAG.goto_target, rec.length))
+        DIAG.goto_target = false
+        log(string.format("SAVESTATE : rejeu jusqu'a la frame %d sur %d, puis pause",
+            SLOW.fast, rec.length))
+    end
+
     DIAG.decor_apply(rec.decor)
     restore_pose(rec.pose)
 
@@ -4027,6 +4060,9 @@ local function takeover_recording()
 
     diag_end("play")
 
+    -- B avant d'atteindre le savestate : plus de pause a poser.
+    SLOW.fast = false
+
     TAS.Mode = "rec"
     TAS.RecStart = TAS.PlayStart
     TAS.RecLast = last
@@ -4047,6 +4083,60 @@ local function takeover_recording()
 
     log(string.format("REC repris pendant le rejeu a la frame %d : %d frames gardees, %d valeurs de hasard a renoter",
         frame, frame, dropped))
+end
+
+-- Savestate, build -57. Shift+B pose le savestate sur la frame courante du
+-- REC ou du PLAY ; Shift+N recharge le monde et rejoue la prise jusqu'a
+-- cette frame, a 140 fps, puis met en pause juste avant elle. B y reprend la
+-- main, takeover_recording ; Shift+V continue le rejeu. Unreal ne permet pas
+-- de copier l'etat du jeu : le rejeu depuis le monde remis en tient lieu.
+function DIAG.savestate_mark()
+
+    if TAS.Mode ~= "rec" and TAS.Mode ~= "play" then
+        log("SAVESTATE : Shift+B se fait pendant un REC ou un PLAY")
+        return
+    end
+
+    local frame = TAS.Frame - (TAS.Mode == "rec" and TAS.RecStart or TAS.PlayStart)
+
+    TAS.Rec.savestate = frame
+
+    -- En PLAY, la prise est deja ecrite : on la reecrit avec le savestate.
+    if TAS.Mode == "play" then
+        save_recording(TAS.Rec)
+    end
+
+    log(string.format("SAVESTATE pose a la frame %d%s", frame,
+        TAS.Mode == "rec" and ", ecrit avec la prise a l'arret du REC" or ""))
+end
+
+function DIAG.savestate_goto()
+
+    if TAS.Mode == "rec" then
+        stop_recording()
+    elseif TAS.Mode == "play" then
+        stop_replay("Shift+N")
+    end
+
+    local rec = TAS.Rec or load_recording()
+
+    if not rec or not rec.savestate then
+        log("SAVESTATE : aucun dans la prise, le poser avec Shift+B pendant un REC ou un PLAY")
+        return
+    end
+
+    if not rec.save_hex then
+        log("SAVESTATE : prise faite sans reset, le monde ne peut pas etre remis")
+        return
+    end
+
+    TAS.Rec = rec
+    DIAG.goto_target = rec.savestate
+
+    if not reset_session("play") then
+        DIAG.goto_target = false
+        log("SAVESTATE : rechargement impossible")
+    end
 end
 
 ----------------------------------------------------------
@@ -4377,6 +4467,8 @@ function recorder_tick()
             end
         elseif request == "play" then
             if TAS.Mode == "idle" then
+                -- N simple : pas de pause au savestate restee d'un Shift+N annule.
+                DIAG.goto_target = false
                 if not reset_session("play") then
                     start_replay()
                 end
@@ -4385,6 +4477,12 @@ function recorder_tick()
                 stop_replay("N")
                 return
             end
+        elseif request == "mark" then
+            DIAG.savestate_mark()
+            return
+        elseif request == "goto" then
+            DIAG.savestate_goto()
+            return
         elseif request == "probe" then
             probe_start()
             return
@@ -4873,6 +4971,106 @@ local function keith_class()
     end
 
     return is_alive(cls) and cls or nil
+end
+
+-- Trace des evenements du monde, build -60. Prise longue du build -59 : les
+-- ponts BP_Bridge_Straight et Capsule_BP3_2 demarrent a la frame 5747 en REC
+-- et 5748 en PLAY, alors que Keith est au meme endroit ; Keith le paie a
+-- 11543 en marchant dessus. La trace ne couvrait que Keith : on accroche
+-- aussi le graphe d'evenements des acteurs qui ont une timeline, et du
+-- script de niveau. Chaque evenement compte dans la trace comme
+-- "W:acteur:point d'entree", compare REC / PLAY comme le reste.
+DIAG.world_hooked = {}
+
+function DIAG.hook_world_class(cls)
+
+    local ok_n, full = pcall(function() return cls:GetFullName() end)
+
+    if not ok_n then return 0 end
+
+    local key = tostring(full)
+
+    if DIAG.world_hooked[key] or key:find("Keith_BP", 1, true) then return 0 end
+
+    DIAG.world_hooked[key] = true
+
+    -- Chemins d'abord, accroches ensuite : pas de RegisterHook pendant
+    -- ForEachFunction.
+    local paths = {}
+
+    for _, c in ipairs(blueprint_chain(cls)) do
+        pcall(function()
+            c:ForEachFunction(function(f)
+                local ok_f, ffull = pcall(function() return f:GetFullName() end)
+                local path = ok_f and tostring(ffull):match("^%S+%s+(.+)$")
+                local name = path and path:match(":([^:]+)$")
+                if name and name:find("^ExecuteUbergraph") and not DIAG.world_hooked[path] then
+                    DIAG.world_hooked[path] = true
+                    paths[#paths + 1] = path
+                end
+            end)
+        end)
+    end
+
+    local count = 0
+
+    for _, path in ipairs(paths) do
+        local ok = pcall(function()
+            RegisterHook(path, function(Context, EntryPoint)
+                if TAS.Mode == "idle" then return nil end
+                local owner = "?"
+                pcall(function()
+                    owner = Context:get():GetFName():ToString():gsub("_C_%d+$", "")
+                end)
+                local ok_e, entry_point = pcall(function() return EntryPoint:get() end)
+                diag_count("W:" .. owner .. ":" .. tostring(ok_e and entry_point or -1))
+                return nil
+            end)
+        end)
+        if ok then count = count + 1 end
+    end
+
+    return count
+end
+
+-- Classes a tracer : proprietaires d'une timeline, et scripts de niveau.
+-- Appele au debut du REC et du PLAY, puis toutes les 1400 frames aux memes
+-- frames relatives, pour les zones chargees en cours de route.
+function DIAG.scan_world_classes()
+
+    if not TAS_CONFIG.diag_trace then return end
+
+    local classes = {}
+
+    pcall(function()
+        for _, timeline in ipairs(FindAllOf("TimelineComponent") or {}) do
+            if is_alive(timeline) then
+                local owner = timeline:GetOwner()
+                if is_alive(owner) then classes[#classes + 1] = owner:GetClass() end
+            end
+        end
+    end)
+
+    pcall(function()
+        for _, script in ipairs(FindAllOf("LevelScriptActor") or {}) do
+            if is_alive(script) then classes[#classes + 1] = script:GetClass() end
+        end
+    end)
+
+    local added, hooks = 0, 0
+
+    for _, cls in ipairs(classes) do
+        if is_alive(cls) then
+            local n = DIAG.hook_world_class(cls)
+            if n > 0 then
+                added, hooks = added + 1, hooks + n
+            end
+        end
+    end
+
+    if added > 0 then
+        log(string.format("TRACE MONDE : %d classes de plus, %d graphes d'evenements accroches", added, hooks))
+    end
 end
 
 local DiagHooksInstalled = false
@@ -5797,6 +5995,8 @@ function diag_begin(mode)
 
     if not TAS_CONFIG.diag_trace then return end
 
+    DIAG.scan_world_classes()
+
     DIAG.calls = {}
     DIAG.pending_sig = false
     DIAG.desired_last = false
@@ -5899,6 +6099,12 @@ function diag_tick()
 
     local mode = TAS.Mode
     local f = TAS.Frame - (mode == "rec" and TAS.RecStart or TAS.PlayStart)
+
+    -- Zones du niveau chargees en cours de route : nouvelles classes du
+    -- monde a tracer, aux memes frames relatives en REC et en PLAY.
+    if f > 0 and f % 1400 == 0 then
+        DIAG.scan_world_classes()
+    end
 
     -- 1. Fonctions appelees depuis le dernier tick
     local sig = DIAG.pending_sig or trace_signature()
@@ -7559,6 +7765,23 @@ RegisterKeyBind(
     end
 )
 
+-- Shift+B : poser le savestate ; Shift+N : y revenir. Build -57.
+RegisterKeyBind(
+    Key.B,
+    { ModifierKey.SHIFT },
+    function()
+        TAS.ModeRequest = "mark"
+    end
+)
+
+RegisterKeyBind(
+    Key.N,
+    { ModifierKey.SHIFT },
+    function()
+        TAS.ModeRequest = "goto"
+    end
+)
+
 -- V : frame par frame ; en marche, V met en pause. Shift+V : pause / reprise.
 -- Ctrl+V : ralenti x1 -> 1/2 -> 1/4 -> 1/8 -> 1/16. Meme principe que B/N :
 -- le callback ne fait que changer une cle existante, SLOW.gate fait le reste.
@@ -8082,7 +8305,10 @@ log(
 )
 log("B = Enregistrer / arreter (pendant un PLAY : reprendre la main)")
 log("N = Rejouer / arreter")
-log("V = Sonde input en 3 etapes (touches, saut, sprint)")
+log("Shift+B = Poser le savestate sur la frame courante")
+log("Shift+N = Revenir au savestate : rechargement, rejeu, pause")
+log("V = +1 frame | Shift+V = pause | Ctrl+V = ralenti")
+log("F = Reset du monde | Shift+F = reset du monde et de Keith")
 log("L = Afficher / masquer le HUD")
 log("U = Dump de diagnostic")
 log("Y = Scan des fonctions d'input")
