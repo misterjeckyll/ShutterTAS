@@ -58,6 +58,10 @@ TAS_CONFIG = {
     -- Volontairement bavards ; false pour les couper.
     debug_log    = true,
 
+    -- Dumps par frame de l'enquete sur le saut et le sprint (AIR, FENETRE) :
+    -- utiles pour une nouvelle enquete, trop couteux en temps normal.
+    debug_verbose = false,
+
     -- Diagnostic REC / PLAY (10/09) : trace de toutes les fonctions de
     -- Keith, instantanes de ses variables, appels aux timelines et
     -- detecteur de drift. Tres bavard, plusieurs centaines de hooks :
@@ -86,6 +90,25 @@ TAS_CONFIG = {
     -- rejouee arrive ainsi a la meme etape de la frame qu'en REC.
     camera_inject = true,
 
+    -- Releve de l'etat du monde (build -22) : tous les acteurs du niveau au
+    -- debut et a la fin du REC et du PLAY, compares dans le log (MONDE ...).
+    -- Premiere etape d'un savestate du monde. false pour le couper.
+    world_survey = true,
+
+    -- Apres un reset (F / Shift+F), arreter les cinematiques en cours :
+    -- l'animation du debut ne sert a rien pour un TAS.
+    skip_intro   = true,
+
+    -- Apres un chargement sans reference (C), la prendre automatiquement une
+    -- fois l'intro terminee. B prend aussi la reference, dans tous les cas.
+    auto_reference = true,
+
+    -- Releves du monde de controle apres un reset (+1, +3, +6 s et meme
+    -- frame que la reference). Ils ont valide les resets ; celui de +1 s a
+    -- fait planter UE4SS pendant la destruction de l'ancien niveau
+    -- (build -33). Coupes par defaut.
+    reset_world_checks = false,
+
     -- key_hooks : DESACTIVE, et ce n'est pas un reglage de confort.
     --
     -- Les callbacks de RegisterKeyBind s'executent sur le thread
@@ -110,7 +133,7 @@ KEY_DISPLAY_FRAMES = 30
 -- Marqueur de version : loggue au chargement et affiche par F8.
 -- A incrementer a chaque modification, pour verifier que le jeu charge
 -- bien le fichier copie et non une version restee en place.
-TAS_BUILD = "2026-09-10-21"
+TAS_BUILD = "2026-09-10-34"
 
 TAS = {
     Frame = 0,
@@ -283,7 +306,19 @@ local DIAG = {
     engine = false,      -- GameEngine, si le pas fixe a ete applique
     fixed_on = false,
     axis_seen = {},      -- axes demandes par le jeu via GetInputAxisValue
-    scale_last = false   -- derniers parametres de ScaleProjectedObject
+    scale_last = false,  -- derniers parametres de ScaleProjectedObject
+    world_rec0 = false,  -- releve du monde au debut du REC
+    world_rec1 = false,  -- et a la fin du REC
+    world_ref = false,   -- releve de reference, pris par la touche C
+    reset_frame = false, -- TAS.Frame du dernier reset detecte
+    last_load_frame = false, -- TAS.Frame du dernier chargement de niveau
+    snapshot_delay = 700, -- pas de releve du monde dans les 5 s qui suivent
+    ref_offset = false,  -- frames entre ce chargement et la touche C
+    save_sum = false,    -- empreinte de la copie de SaveSlot0.sav
+    ref_pose = false,    -- Keith complet au moment de C
+    pending_pose = false, -- Keith a remettre apres le rechargement
+    pending_label = false,
+    check_pose = false   -- pose remise, verifiee une seconde apres
 }
 
 -- Injection camera en PLAY (voir apply_camera et install_camera_hooks).
@@ -313,6 +348,11 @@ local diag_cut
 local capture_keith
 local restore_keith
 local time_report
+local world_event
+local world_tick
+local world_reference
+local world_mark_reset
+local reload_level
 
 --------------------------------------------------------
 -- ECRITURE DE TEXTE
@@ -2292,6 +2332,11 @@ local function dbg(fmt, ...)
     log(string.format("[DBG f=%d%s] %s", TAS.Frame, rel, ok and text or fmt))
 end
 
+local QUIET_CHANNELS = {
+    CamPitch = true, CamYaw = true, CamRoll = true,
+    LookUpDown = true, LookLeftRight = true, MoveMouse = true
+}
+
 local function record_value(channel, value)
 
     if TAS.Mode ~= "rec" or value == nil then
@@ -2315,7 +2360,12 @@ local function record_value(channel, value)
     entry[channel] = value
     TAS.Rec.count = TAS.Rec.count + 1
 
-    dbg("REC %s = %s", channel, tostring(value))
+    -- Souris et camera changent a chaque frame : 11 500 lignes sur une
+    -- prise d'une minute (build -22), et la console UE4SS ralentissait le
+    -- jeu. Enregistres, mais plus logues.
+    if not QUIET_CHANNELS[channel] then
+        dbg("REC %s = %s", channel, tostring(value))
+    end
 end
 
 -- FKey = struct { KeyName : FName } ; UE4SS convertit une table en struct.
@@ -2567,8 +2617,6 @@ local function install_axis_override()
                 end)
 
                 if not ok_name or type(name) ~= "string" then return end
-
-                diag_count("AXIS:" .. name)
 
                 if not DIAG.axis_seen[name] then
                     DIAG.axis_seen[name] = true
@@ -3222,6 +3270,7 @@ local function stop_replay(reason)
     end
 
     diag_end("play")
+    world_event("play_stop")
     TAS.Mode = "idle"
     TAS.PlayState = false
     TAS.PlayJump = false
@@ -3369,6 +3418,10 @@ local function start_recording()
     poll_channels()
 
     diag_begin("rec")
+    world_event("rec_start")
+
+    -- B vaut C : F / Shift+F ramenent au debut de l'enregistrement.
+    world_reference(TAS_CONFIG.world_survey and DIAG.world_rec0 or nil, "B, debut d'enregistrement")
 
     log("REC demarre a la frame " .. tostring(TAS.Frame))
 end
@@ -3377,6 +3430,7 @@ local function stop_recording()
 
     TAS.Rec.length = TAS.Frame - TAS.RecStart
     diag_end("rec")
+    world_event("rec_stop")
     TAS.Mode = "idle"
 
     log(string.format("REC arrete : %d frames, %d evenements",
@@ -3424,6 +3478,7 @@ local function start_replay()
     TAS.DbgLastValue = {}
 
     diag_begin("play")
+    world_event("play_start")
 
     log(string.format("PLAY demarre : %d frames, %s evenements",
         rec.length, tostring(rec.count)))
@@ -3637,7 +3692,7 @@ local function debug_watch()
 
         -- Sprint, 10/09 : DesiredGait retombe a 1 la frame qui suit son passage
         -- a 2, en rejeu seulement. On compare REC et PLAY frame par frame.
-        if TAS.DbgWindow and TAS.Frame <= TAS.DbgWindow then
+        if TAS_CONFIG.debug_verbose and TAS.DbgWindow and TAS.Frame <= TAS.DbgWindow then
             local function field(name)
                 local x = read_field(pawn, name)
                 local t = type(x)
@@ -3654,7 +3709,7 @@ local function debug_watch()
         -- les deux causes d'ecart REC / PLAY : touches rejouees 1 frame en
         -- retard (corrige dans replay_step) et timeline JumpGravity dans un
         -- autre etat au depart (corrige dans capture_pose / restore_pose).
-        if TAS.DbgWatch.MovementState == 2 then
+        if TAS_CONFIG.debug_verbose and TAS.DbgWatch.MovementState == 2 then
 
             local ok_v, velocity = pcall(function() return pawn:GetVelocity() end)
             local vx, vy, vz = vector_xyz(ok_v and velocity or nil)
@@ -3734,6 +3789,7 @@ end
 function recorder_tick()
 
     time_report()
+    world_tick()
 
     local request = TAS.ModeRequest
 
@@ -3759,6 +3815,15 @@ function recorder_tick()
             end
         elseif request == "probe" then
             probe_start()
+            return
+        elseif request == "worldref" then
+            world_reference()
+            return
+        elseif request == "reload_state" then
+            reload_level(false)
+            return
+        elseif request == "reload_pos" then
+            reload_level(true)
             return
         end
     end
@@ -4176,7 +4241,9 @@ local function trace_excluded(name)
 
     -- Les BndEvt__ (chocs de la capsule et du mesh) finissent aussi par
     -- __DelegateSignature mais sont de vrais evenements : on les garde.
-    if name:find("^InpActEvt_")
+    -- InpAxisEvt_Look* : appeles a chaque mouvement de souris, ils
+    -- basculaient dans la trace a chaque frame (build -22) sans rien apprendre.
+    if name:find("^InpActEvt_") or name:find("^InpAxisEvt_Look")
         or (name:find("__DelegateSignature$") and not name:find("^BndEvt__")) then
         return true
     end
@@ -4468,7 +4535,9 @@ local function apply_fixed_timestep()
 end
 
 -- Variables de Keith lisibles : scalaires, vecteurs, timelines. Une fois.
-local function resolve_props(pawn)
+-- label : nom pour le log ; nil = silencieux (releve du monde, une classe
+-- apres l'autre).
+local function resolve_props(pawn, label)
 
     local list, counts = {}, {}
     local cls = nil
@@ -4512,7 +4581,9 @@ local function resolve_props(pawn)
     end
 
     table.sort(parts)
-    log(string.format("Variables de Keith suivies : %d (%s)", #list, table.concat(parts, ", ")))
+    if label then
+        log(string.format("Variables de %s suivies : %d (%s)", label, #list, table.concat(parts, ", ")))
+    end
 
     return list
 end
@@ -4572,7 +4643,7 @@ end
 local function take_snapshot(pawn)
 
     if not DIAG.props then
-        DIAG.props = resolve_props(pawn)
+        DIAG.props = resolve_props(pawn, "Keith")
     end
 
     local snap = {}
@@ -4946,7 +5017,7 @@ end
 function capture_keith(pawn)
 
     if not DIAG.props then
-        DIAG.props = resolve_props(pawn)
+        DIAG.props = resolve_props(pawn, "Keith")
     end
 
     local state = {}
@@ -5270,6 +5341,887 @@ function diag_tick()
     end
 end
 
+----------------------------------------------------------
+-- ETAT DU MONDE : RELEVE (10/09, build -22)
+--
+-- Premiere etape vers un savestate du monde : savoir CE qui change. On
+-- releve tous les acteurs du niveau (position, rotation ; physique et
+-- variables pour les acteurs Blueprint) a quatre moments : debut et fin du
+-- REC, debut (apres restauration de Keith) et fin du PLAY. Comparaisons :
+--
+--   pendant le REC                     ce que le joueur a change
+--   au depart du PLAY / debut du REC   ce qu'un savestate devra restaurer
+--   fin du PLAY / fin du REC           le monde a-t-il diverge ?
+--
+-- Couteux (milliers d'appels) mais ponctuel ; avec le pas fixe, la frame qui
+-- en patit garde la meme duree de jeu.
+----------------------------------------------------------
+
+-- Classes sans interet pour l'etat du monde (joueur, interface, regles).
+local WORLD_SKIP = {
+    "Controller", "HUD", "CameraManager", "GameMode", "GameState",
+    "PlayerState", "WorldSettings", "GameSession"
+}
+
+local WORLD_LINES = 40
+
+local WorldClassInfo = {}   -- nom court de classe -> { bp, skip }
+local WorldProps = {}       -- nom court de classe -> variables suivies
+
+local function world_class_info(actor, short_class)
+
+    local info = WorldClassInfo[short_class]
+
+    if info then return info end
+
+    local full = ""
+
+    pcall(function() full = actor:GetClass():GetFullName() end)
+
+    info = { bp = full:find("/Game/", 1, true) ~= nil, skip = false }
+
+    for _, word in ipairs(WORLD_SKIP) do
+        if full:find(word, 1, true) then
+            info.skip = true
+            break
+        end
+    end
+
+    WorldClassInfo[short_class] = info
+
+    return info
+end
+
+local function world_snapshot()
+
+    -- Et pas de releve dans les 5 s qui suivent un chargement : l'ancien
+    -- niveau n'est pas encore detruit.
+    if DIAG.last_load_frame and TAS.Frame - DIAG.last_load_frame < DIAG.snapshot_delay then
+        log(string.format("MONDE : releve saute, chargement trop recent (%d frames)",
+            TAS.Frame - DIAG.last_load_frame))
+        return nil
+    end
+
+    local t0 = os.clock()
+
+    local ok, actors = pcall(function() return FindAllOf("Actor") end)
+
+    if not ok or type(actors) ~= "table" then
+        log("MONDE : FindAllOf(\"Actor\") ne repond pas, releve impossible")
+        return nil
+    end
+
+    local pawn = get_player_pawn()
+    local pawn_name = ""
+
+    if pawn then
+        pcall(function() pawn_name = pawn:GetFullName() end)
+    end
+
+    local snap = { actors = {}, count = 0, bp = 0, phys = 0 }
+
+    for _, actor in ipairs(actors) do
+
+        local full = nil
+
+        -- Build -34 : un releve 1 s apres un rechargement a plante UE4SS
+        -- (UStruct::IsChildOf sur une classe 0xffffffffffffffff) : des acteurs
+        -- de l'ancien niveau, en cours de destruction, pointaient sur des
+        -- composants liberes. On valide chaque acteur avant d'y toucher.
+        if is_alive(actor) then
+            pcall(function() full = actor:GetFullName() end)
+        end
+
+        if full and full ~= pawn_name then
+
+            local short_class = full:match("^(%S+)") or "?"
+            local info = world_class_info(actor, short_class)
+
+            if not info.skip then
+
+                local e = { cls = short_class }
+
+                local ok_l, location = pcall(function() return actor:K2_GetActorLocation() end)
+                if ok_l then e.x, e.y, e.z = vector_xyz(location) end
+
+                local ok_r, rotation = pcall(function() return actor:K2_GetActorRotation() end)
+                if ok_r then e.pitch, e.yaw, e.roll = rotator_pyr(rotation) end
+
+                -- Physique et variables : Blueprints seulement. Un acteur natif
+                -- qui bouge entre deux releves sera de toute facon signale.
+                if info.bp then
+
+                    snap.bp = snap.bp + 1
+
+                    local root = read_field(actor, "RootComponent")
+
+                    if is_alive(root) then
+                        local ok_p, simulating = pcall(function() return root:IsSimulatingPhysics() end)
+                        e.phys = ok_p and simulating == true
+                        if e.phys then
+                            snap.phys = snap.phys + 1
+                            local ok_v, velocity = pcall(function() return actor:GetVelocity() end)
+                            if ok_v then e.vx, e.vy, e.vz = vector_xyz(velocity) end
+                        end
+                    end
+
+                    local props = WorldProps[short_class]
+
+                    if props == nil then
+                        props = resolve_props(actor, nil)
+                        WorldProps[short_class] = props
+                    end
+
+                    if #props > 0 then
+                        e.vars = {}
+                        for _, p in ipairs(props) do
+                            e.vars[p.name] = snap_value(actor, p.name, p.kind)
+                        end
+                    end
+                end
+
+                snap.actors[full] = e
+                snap.count = snap.count + 1
+            end
+        end
+    end
+
+    snap.ms = (os.clock() - t0) * 1000
+
+    return snap
+end
+
+local function short_name(full)
+    return full:match("([^%.:]+)$") or full
+end
+
+local function world_diff(a, b, label)
+
+    if not a or not b then
+        dbg("MONDE %s : pas de releve de reference", label)
+        return
+    end
+
+    local moved, changed, appeared, vanished = {}, {}, {}, {}
+
+    -- Acteur a l'origine exacte d'un cote : zone du niveau pas encore
+    -- chargee (ou dechargee) au moment du releve, pas un vrai deplacement.
+    local streamed = 0
+
+    for name, eb in pairs(b.actors) do
+
+        local ea = a.actors[name]
+
+        if not ea then
+            appeared[#appeared + 1] = { name = name, e = eb }
+        else
+            if ea.x and eb.x then
+                local d = math.sqrt((eb.x - ea.x) ^ 2 + (eb.y - ea.y) ^ 2 + (eb.z - ea.z) ^ 2)
+                local dr = 0
+                if ea.yaw and eb.yaw then
+                    dr = math.abs(angle_delta(ea.yaw, eb.yaw)) + math.abs(angle_delta(ea.pitch, eb.pitch))
+                        + math.abs(angle_delta(ea.roll, eb.roll))
+                end
+                local at_origin = (ea.x == 0 and ea.y == 0 and ea.z == 0)
+                    or (eb.x == 0 and eb.y == 0 and eb.z == 0)
+                if (d > 0.01 or dr > 0.01) and at_origin then
+                    streamed = streamed + 1
+                elseif d > 0.01 or dr > 0.01 then
+                    moved[#moved + 1] = {
+                        d = d,
+                        text = string.format("%s (%s) de %.2f u / %.2f deg : %.1f %.1f %.1f -> %.1f %.1f %.1f%s",
+                            short_name(name), eb.cls, d, dr, ea.x, ea.y, ea.z, eb.x, eb.y, eb.z,
+                            eb.phys and " [physique]" or "")
+                    }
+                end
+            end
+            if ea.vars and eb.vars then
+                for var, vb in pairs(eb.vars) do
+                    local va = ea.vars[var]
+                    if va ~= nil and values_differ(va, vb) then
+                        changed[#changed + 1] = string.format("%s.%s : %s -> %s", short_name(name), var, va, vb)
+                    end
+                end
+            end
+        end
+    end
+
+    for name, ea in pairs(a.actors) do
+        if not b.actors[name] then
+            vanished[#vanished + 1] = { name = name, e = ea }
+        end
+    end
+
+    -- Build -28 : apres un rechargement, le moteur recree ses propres acteurs
+    -- (cameras, gestionnaires, pawn spectateur) sous un autre numero. Meme
+    -- classe au meme endroit = le meme acteur, pas un vrai ecart.
+    local renamed = 0
+
+    for _, new in ipairs(appeared) do
+        for _, old in ipairs(vanished) do
+            if not old.paired and old.e.cls == new.e.cls
+                and math.abs((old.e.x or 0) - (new.e.x or 0)) < 1
+                and math.abs((old.e.y or 0) - (new.e.y or 0)) < 1
+                and math.abs((old.e.z or 0) - (new.e.z or 0)) < 1 then
+                old.paired, new.paired = true, true
+                renamed = renamed + 1
+                break
+            end
+        end
+    end
+
+    local function describe(list, with_position)
+        local out = {}
+        for _, item in ipairs(list) do
+            if not item.paired then
+                out[#out + 1] = with_position
+                    and string.format("%s (%s) a %.1f %.1f %.1f", short_name(item.name), item.e.cls,
+                        item.e.x or 0, item.e.y or 0, item.e.z or 0)
+                    or string.format("%s (%s)", short_name(item.name), item.e.cls)
+            end
+        end
+        return out
+    end
+
+    appeared = describe(appeared, true)
+    vanished = describe(vanished, false)
+
+    table.sort(moved, function(p, q) return p.d > q.d end)
+    table.sort(changed)
+    table.sort(appeared)
+    table.sort(vanished)
+
+    dbg("MONDE %s : %d deplaces, %d variables changees, %d apparus, %d disparus, %d recrees sous un autre nom, %d zones chargees entre-temps (releve : %d acteurs dont %d Blueprint, %d physiques, %.0f ms)",
+        label, #moved, #changed, #appeared, #vanished, renamed, streamed, b.count, b.bp, b.phys, b.ms)
+
+    for i = 1, math.min(WORLD_LINES, #moved) do
+        dbg("MONDE %s | deplace %s", label, moved[i].text)
+    end
+
+    for i = 1, math.min(WORLD_LINES, #changed) do
+        dbg("MONDE %s | variable %s", label, changed[i])
+    end
+
+    for i = 1, math.min(WORLD_LINES, #appeared) do
+        dbg("MONDE %s | apparu %s", label, appeared[i])
+    end
+
+    for i = 1, math.min(WORLD_LINES, #vanished) do
+        dbg("MONDE %s | disparu %s", label, vanished[i])
+    end
+end
+
+function world_event(kind)
+
+    if not TAS_CONFIG.world_survey then return end
+
+    local snap = world_snapshot()
+
+    if not snap then return end
+
+    if kind == "rec_start" then
+        DIAG.world_rec0 = snap
+        dbg("MONDE releve au debut du REC : %d acteurs dont %d Blueprint, %d physiques (%.0f ms)",
+            snap.count, snap.bp, snap.phys, snap.ms)
+    elseif kind == "rec_stop" then
+        DIAG.world_rec1 = snap
+        world_diff(DIAG.world_rec0, snap, "pendant le REC")
+    elseif kind == "play_start" then
+        world_diff(DIAG.world_rec0, snap, "au depart du PLAY (vs debut du REC)")
+    elseif kind == "play_stop" then
+        world_diff(DIAG.world_rec1, snap, "fin du PLAY (vs fin du REC)")
+    end
+end
+
+----------------------------------------------------------
+-- RESET DU JEU (touche R) : que remet-il a zero ? (build -24)
+--
+-- Le releve du 10/09 montre un monde trop riche pour etre restaure objet
+-- par objet (5 500 acteurs charges en cours de route, 9 declencheurs
+-- detruits apres usage, script du niveau, ponts animes). Piste : repartir
+-- d'un monde recharge, par le Reset du jeu, avant le REC et avant le PLAY.
+--
+-- On mesure d'abord ce que fait ce reset :
+--   C      releve de reference, a prendre juste apres un chargement ;
+--   reset  detecte par ClientRestart, les fonctions Reset du controleur,
+--          LoadGameFromSlot ou OpenLevel (chacun logue : on saura lequel
+--          la touche R emprunte) ;
+--   puis 1, 3 et 6 s apres, comparaison du monde a la reference.
+----------------------------------------------------------
+
+-- Une table plutot que des locales : le fichier est a la limite de Lua de
+-- 200 variables locales au niveau principal (build -29).
+local RESET = {
+    checks = { 140, 420, 840 },   -- frames apres le chargement : 1, 3, 6 s
+    skip_at = 30,                 -- arret des cinematiques d'intro
+    restore_at = 60,              -- remise en place de Keith
+    window = 1400,                -- fenetre de saut des cinematiques : 10 s
+    window_start = false,
+    window_until = false,
+    queue = {},                   -- cinematiques lancees, a traiter au tick
+    -- Build -31 : couper Seq_Game_Start (GoToEndAndStop) laissait Keith
+    -- allonge et sans commandes, sa fin normale n'ayant jamais lieu. Les
+    -- cinematiques sont donc ACCELEREES jusqu'a leur fin ; seule la boucle du
+    -- menu (Seq_MainMenu_Levitation), sans fin, est coupee.
+    speed = 30,
+    stop_names = { Seq_MainMenu_Levitation = true },
+    fast = {},                    -- nom -> lecteur accelere, en attente de fin
+    pose = false,                 -- Keith remis apres le chargement
+    -- Reference automatique (build -32) : apres un chargement sans reference,
+    -- prise quand plus aucune cinematique ne joue (au moins 2 s, au plus 30 s).
+    auto_pending = false,
+    auto_min = 280,
+    auto_max = 4200,
+    info_count = {},
+    installed = false
+}
+
+-- 3e champ = simple information. Mesure du build -24 : le jeu appelle
+-- LoadGameFromSlot toutes les ~2 s en jeu normal, ce n'est pas un reset ; et
+-- la touche R (Interface_Reset) ne recharge rien : Keith et le monde restent
+-- en l'etat.
+RESET.hooks = {
+    { "/Game/Blueprints/GameMode/Shutter_PlayerController.Shutter_PlayerController_C:Reset", "Shutter_PlayerController:Reset" },
+    { "/Game/Blueprints/GameMode/Shutter_PlayerController.Shutter_PlayerController_C:Interface_Reset", "touche R (Interface_Reset)" },
+    { "/Script/Engine.GameplayStatics:LoadGameFromSlot", "GameplayStatics:LoadGameFromSlot", true },
+    { "/Script/Engine.GameplayStatics:OpenLevel", "GameplayStatics:OpenLevel" }
+}
+
+
+local function keith_position_text()
+
+    local pawn = get_player_pawn()
+
+    if not pawn then return "absent" end
+
+    local x, y, z = get_player_location(pawn)
+    local name = "?"
+
+    pcall(function() name = pawn:GetFullName() end)
+
+    return string.format("%s a %s", short_name(name),
+        x and string.format("%.1f %.1f %.1f", x, y, z) or "?")
+end
+
+----------------------------------------------------------
+-- Sauvegarde du jeu (build -26). F recharge au DERNIER checkpoint, et le
+-- jeu reecrit SaveSlot0.sav en cours de partie (mesure du test -25 : 5 s
+-- avant le F). C copie donc la sauvegarde, F la remet avant de recharger.
+----------------------------------------------------------
+
+-- Une seule table : le fichier principal a atteint la limite de Lua de 200
+-- variables locales (build -26).
+local SAVE = {
+    backup_path = "Mods/ShutterTASDiscovery/Scripts/SaveSlot0_tas_backup.sav",
+    path = false,
+    candidates = {
+        function()
+            local base = os.getenv("LOCALAPPDATA")
+            return base and (base .. "\\Shutter\\Saved\\SaveGames\\SaveSlot0.sav") or nil
+        end,
+        function()
+            return "C:\\users\\steamuser\\AppData\\Local\\Shutter\\Saved\\SaveGames\\SaveSlot0.sav"
+        end
+    }
+}
+
+function SAVE.read(path)
+    local ok, data = pcall(function()
+        local file = io.open(path, "rb")
+        if not file then return nil end
+        local content = file:read("a")
+        file:close()
+        return content
+    end)
+    return ok and data or nil
+end
+
+function SAVE.write(path, data)
+    return (pcall(function()
+        local file = assert(io.open(path, "wb"))
+        file:write(data)
+        file:close()
+    end))
+end
+
+function SAVE.checksum(data)
+    local sum = 0
+    for i = 1, #data do
+        sum = (sum * 31 + data:byte(i)) % 4294967296
+    end
+    return string.format("%08x", sum)
+end
+
+function SAVE.find()
+
+    if SAVE.path then return SAVE.path end
+
+    for _, candidate in ipairs(SAVE.candidates) do
+        local ok, path = pcall(candidate)
+        if ok and path and SAVE.read(path) then
+            SAVE.path = path
+            log("Sauvegarde du jeu trouvee : " .. path)
+            return path
+        end
+    end
+
+    log("SAVE : SaveSlot0.sav introuvable")
+
+    return nil
+end
+
+function SAVE.backup()
+
+    local path = SAVE.find()
+    local data = path and SAVE.read(path)
+
+    if not data then return end
+
+    if SAVE.write(SAVE.backup_path, data) then
+        DIAG.save_sum = SAVE.checksum(data)
+        log(string.format("SAVE copiee : %d octets, empreinte %s -> %s", #data, DIAG.save_sum, SAVE.backup_path))
+    else
+        log("SAVE : copie impossible vers " .. SAVE.backup_path)
+    end
+end
+
+function SAVE.restore()
+
+    local data = SAVE.read(SAVE.backup_path)
+
+    if not data then
+        log("SAVE : aucune copie a remettre, appuie sur C d'abord")
+        return false
+    end
+
+    local path = SAVE.find()
+
+    if not path then return false end
+
+    local current = SAVE.read(path)
+    local before = current and SAVE.checksum(current) or "?"
+
+    -- Filet de securite : remettre la copie C efface la progression faite
+    -- depuis. On garde donc la sauvegarde du moment, recuperable a la main.
+    if current then
+        local kept = "Mods/ShutterTASDiscovery/Scripts/SaveSlot0_avant_F.sav"
+        log(string.format("SAVE actuelle gardee dans %s : %s", kept,
+            SAVE.write(kept, current) and "ok" or "ECHEC"))
+    end
+
+    if not SAVE.write(path, data) then
+        log("SAVE : ecriture impossible dans " .. path)
+        return false
+    end
+
+    local back = SAVE.read(path)
+
+    log(string.format("SAVE remise avant rechargement : empreinte %s -> %s, %s",
+        before, SAVE.checksum(data), back == data and "relue identique" or "RELECTURE DIFFERENTE"))
+
+    return back == data
+end
+
+function SAVE.status(label)
+
+    local path = SAVE.find()
+    local data = path and SAVE.read(path)
+
+    if not data then return end
+
+    local sum = SAVE.checksum(data)
+
+    log(string.format("SAVE %s : empreinte %s, %s de la copie C", label, sum,
+        sum == DIAG.save_sum and "identique a celle" or "DIFFERENTE"))
+end
+
+-- source : touche C, B (debut d'enregistrement) ou automatique apres un
+-- chargement. snap : releve deja pris (debut du REC), pour ne pas le refaire.
+function world_reference(snap, source)
+
+    snap = snap or world_snapshot()
+
+    RESET.auto_pending = false
+    DIAG.reset_frame = false
+    DIAG.ref_offset = DIAG.last_load_frame and (TAS.Frame - DIAG.last_load_frame) or false
+
+    if snap then
+        DIAG.world_ref = snap
+    end
+
+    log(string.format("MONDE reference prise (%s) : %s | Keith %s | %s frames apres le chargement",
+        source or "touche C",
+        snap and string.format("%d acteurs dont %d Blueprint", snap.count, snap.bp) or "releve impossible",
+        keith_position_text(), tostring(DIAG.ref_offset or "?")))
+
+    SAVE.backup()
+
+    -- Pour Shift+F : Keith complet (position, 107 variables, saut, mouvement).
+    DIAG.ref_pose = capture_pose()
+end
+
+-- Cinematiques d'intro, apres un F. Build -29 : on ne sait pas encore ce
+-- qu'est l'animation du debut ; on note toutes les LevelSequenceActor et la
+-- camera active, et on arrete celles qui jouent (GoToEndAndStop declenche leur
+-- fin normale : le jeu enchaine comme si l'intro etait terminee).
+-- Nom de la cinematique a partir du nom complet de son lecteur :
+-- "...PersistentLevel.Seq_Game_Start.AnimationPlayer" -> "Seq_Game_Start".
+function RESET.sequence_name(object)
+    local full = "?"
+    pcall(function() full = object:GetFullName() end)
+    return full:match("%.([^%.]+)%.[^%.]+$") or short_name(full)
+end
+
+-- La camera doit revenir sur Keith une fois la cinematique coupee.
+function RESET.ensure_view()
+
+    local controller = get_player_controller()
+    local pawn = get_player_pawn()
+
+    if not controller or not pawn then return end
+
+    local same = false
+
+    pcall(function()
+        same = controller:GetViewTarget():GetFullName() == pawn:GetFullName()
+    end)
+
+    if not same then
+        local ok = pcall(function()
+            controller:SetViewTargetWithBlend(pawn, 0, 0, 0, false)
+        end)
+        log("INTRO : camera remise sur Keith " .. (ok and "ok" or "ECHEC"))
+    end
+end
+
+-- Rend true si la cinematique a ete coupee (la camera est alors a verifier).
+local function stop_sequence(player, name)
+
+    if not is_alive(player) or RESET.fast[name] then return false end
+
+    local playing = false
+    pcall(function() playing = player:IsPlaying() end)
+
+    if not playing then return false end
+
+    if RESET.stop_names[name] then
+        local ok, err = pcall(function() player:GoToEndAndStop() end)
+        log(string.format("INTRO : %s en lecture -> %s", name,
+            ok and "coupee" or ("ERREUR " .. tostring(err))))
+        return ok
+    end
+
+    local ok, err = pcall(function() player:SetPlayRate(RESET.speed) end)
+
+    if ok then
+        RESET.fast[name] = player
+    end
+
+    log(string.format("INTRO : %s en lecture -> %s", name,
+        ok and string.format("acceleree x%d jusqu'a sa fin", RESET.speed) or ("ERREUR " .. tostring(err))))
+
+    return false
+end
+
+-- Cinematiques signalees par le hook de Play : arretees au tick suivant
+-- (les arreter dans le pre-hook, avant Play, ne servirait a rien).
+function RESET.flush_queue()
+
+    if #RESET.queue == 0 then return end
+
+    local queued = RESET.queue
+    RESET.queue = {}
+
+    local stopped = false
+
+    for _, player in ipairs(queued) do
+        if stop_sequence(player, RESET.sequence_name(player)) then
+            stopped = true
+        end
+    end
+
+    if stopped then
+        RESET.ensure_view()
+    end
+end
+
+-- Balayage de secours de toutes les LevelSequenceActor du niveau.
+function RESET.skip_intro()
+
+    if not TAS_CONFIG.skip_intro then return end
+
+    local ok, actors = pcall(function() return FindAllOf("LevelSequenceActor") end)
+
+    if not ok or type(actors) ~= "table" then return end
+
+    local stopped = false
+
+    for _, actor in ipairs(actors) do
+        local name = "?"
+        pcall(function() name = short_name(actor:GetFullName()) end)
+        if stop_sequence(read_field(actor, "SequencePlayer"), name) then
+            stopped = true
+        end
+    end
+
+    if stopped then
+        RESET.ensure_view()
+    end
+end
+
+-- Appele par les hooks : pur Lua, le releve est fait plus tard par world_tick.
+function world_mark_reset(source)
+
+    log(string.format("RESET detecte : %s (frame %d)", source, TAS.Frame))
+
+    -- Le chargement du niveau est l'origine qui compte : les comparaisons
+    -- se font a la meme frame de jeu que la touche C apres le chargement.
+    if source == "PlayerController:ClientRestart" then
+        DIAG.last_load_frame = TAS.Frame
+        DIAG.reset_frame = TAS.Frame
+        -- Chargement provoque par F / Shift+F : on saute les cinematiques.
+        if DIAG.pending_pose then
+            RESET.window_start = TAS.Frame
+            RESET.window_until = TAS.Frame + RESET.window
+        elseif TAS_CONFIG.auto_reference and not DIAG.world_ref then
+            -- Chargement normal sans reference : on la prendra toute seule.
+            RESET.auto_pending = true
+        end
+        return
+    end
+
+    -- Plusieurs hooks tirent pour un meme reset : on garde le premier.
+    if not DIAG.reset_frame or TAS.Frame - DIAG.reset_frame > 60 then
+        DIAG.reset_frame = TAS.Frame
+    end
+end
+
+function world_tick()
+
+    -- Fenetre de saut des cinematiques apres un F / Shift+F (build -30) :
+    -- l'intro enchaine Seq_MainMenu_Levitation (camera vers la boule) puis
+    -- Seq_Game_Start, lancee plus tard. On arrete tout ce qui demarre.
+    if RESET.window_until then
+        if TAS.Frame <= RESET.window_until then
+            local since = TAS.Frame - RESET.window_start
+            if since >= RESET.skip_at and (since - RESET.skip_at) % 20 == 0 then
+                RESET.skip_intro()
+            end
+            RESET.flush_queue()
+
+            -- Fin d'une cinematique acceleree : on remet Keith, au cas ou la
+            -- fin de l'intro l'aurait deplace.
+            for name, player in pairs(RESET.fast) do
+                local playing = false
+                pcall(function() playing = is_alive(player) and player:IsPlaying() end)
+                if not playing then
+                    RESET.fast[name] = nil
+                    log(string.format("INTRO : %s terminee a +%d frames du chargement | Keith %s",
+                        name, since, keith_position_text()))
+                    if RESET.pose then
+                        restore_pose(RESET.pose)
+                        log("INTRO : Keith remis apres la cinematique | " .. keith_position_text())
+                    end
+                end
+            end
+        else
+            RESET.window_until = false
+            RESET.fast = {}
+            RESET.pose = false
+            log("INTRO : fin de la fenetre de saut des cinematiques")
+        end
+    end
+
+    -- Reference automatique : une fois le joueur aux commandes.
+    if RESET.auto_pending and TAS.Mode == "idle" and DIAG.last_load_frame then
+        local since = TAS.Frame - DIAG.last_load_frame
+        -- Jamais sans Keith : une reference sans pose rend Shift+F inutile.
+        if since >= RESET.auto_min and since % 20 == 0 and get_player_pawn() then
+            if RESET.view_on_keith() or since >= RESET.auto_max then
+                world_reference(nil, string.format("automatique, %d frames apres le chargement%s",
+                    since, since >= RESET.auto_max and ", delai maximal atteint" or ", camera sur Keith"))
+            end
+        end
+    end
+
+    local start = DIAG.reset_frame
+
+    if not start then return end
+
+    local elapsed = TAS.Frame - start
+    local last = RESET.checks[#RESET.checks]
+
+    if DIAG.ref_offset and DIAG.ref_offset > last then
+        last = DIAG.ref_offset
+    end
+
+    -- Apres un F : remettre Keith (voir reload_level). Mesure du build -29 :
+    -- les cinematiques ne le deplacent pas, seule la camera est detournee.
+    if elapsed == RESET.restore_at and DIAG.pending_pose then
+        log("RESET : remise en place de Keith (" .. tostring(DIAG.pending_label) .. ")")
+        restore_pose(DIAG.pending_pose)
+        RESET.pose = DIAG.pending_pose
+        DIAG.check_pose = DIAG.pending_pose
+        DIAG.pending_pose = false
+    end
+
+    if elapsed == 140 and DIAG.check_pose then
+        local target = DIAG.check_pose
+        DIAG.check_pose = false
+        log(string.format("RESET verification +1 s : Keith %s (vise %.1f %.1f %.1f)",
+            keith_position_text(), target.x or 0, target.y or 0, target.z or 0))
+    end
+
+    local label = nil
+
+    for _, check in ipairs(RESET.checks) do
+        if elapsed == check then
+            label = string.format("apres reset +%.0f s", check / 140)
+        end
+    end
+
+    if DIAG.ref_offset and elapsed == DIAG.ref_offset then
+        label = string.format("apres reset, meme frame de jeu que C (+%d)", elapsed)
+    end
+
+    if elapsed == 140 and DIAG.save_sum then
+        SAVE.status("apres rechargement +1 s")
+    end
+
+    if label then
+        log(string.format("RESET %s : Keith %s", label, keith_position_text()))
+        if not TAS_CONFIG.reset_world_checks then
+            -- releves de controle coupes par defaut (build -34)
+        elseif DIAG.world_ref then
+            world_diff(DIAG.world_ref, world_snapshot(), label .. " (vs reference C)")
+        else
+            log("RESET : aucune reference, appuie sur C juste apres un chargement")
+        end
+    end
+
+    if elapsed >= last then
+        DIAG.reset_frame = false
+    end
+end
+
+-- Le joueur a-t-il la main ? Sert a la reference automatique.
+-- Build -32 attendait « plus aucune cinematique » : une sequence d'ambiance
+-- tourne en permanence, la reference partait au hasard (pendant un
+-- rechargement, sans Keith). Critere du build -33 : la camera est sur Keith
+-- (pendant Seq_Game_Start, elle est sur une camera de cinematique).
+function RESET.view_on_keith()
+
+    local controller = get_player_controller()
+    local pawn = get_player_pawn()
+
+    if not controller or not pawn then return false end
+
+    local same = false
+
+    pcall(function()
+        same = controller:GetViewTarget():GetFullName() == pawn:GetFullName()
+    end)
+
+    return same
+end
+
+-- Recharge le niveau courant (OpenLevel), apres avoir remis la sauvegarde
+-- de C : le monde revient a l'etat de C (build -27, verifie). Deux resets
+-- (build -29) :
+--   F        etat         Keith reste ou il est (capture juste avant)
+--   Shift+F  etat + pos.  Keith revient a la pose de C
+-- Dans les deux cas, l'intro est arretee puis Keith remis en place.
+-- Refuse pendant un REC ou un PLAY.
+function reload_level(with_position)
+
+    -- Une reference automatique en attente partirait pendant le rechargement.
+    RESET.auto_pending = false
+
+    if with_position then
+        DIAG.pending_pose = DIAG.ref_pose or capture_pose()
+        DIAG.pending_label = DIAG.ref_pose and "etat + position de C"
+            or "etat + position : pas de C, position actuelle"
+    else
+        DIAG.pending_pose = capture_pose()
+        DIAG.pending_label = "etat, Keith garde sa position"
+    end
+
+    if TAS.Mode ~= "idle" then
+        DIAG.pending_pose = false
+        log("Rechargement refuse pendant un REC ou un PLAY")
+        return
+    end
+
+    local pawn = get_player_pawn()
+
+    if not pawn then
+        log("Rechargement impossible : pas de pawn")
+        return
+    end
+
+    -- Sans la sauvegarde de C, on repartirait du dernier checkpoint atteint.
+    if DIAG.save_sum and not SAVE.restore() then
+        log("SAVE : rechargement quand meme, depuis la sauvegarde actuelle")
+    end
+
+    local ok, err = pcall(function()
+        local library = StaticFindObject("/Script/Engine.Default__GameplayStatics")
+        local level = library:GetCurrentLevelName(pawn, true)
+        local name = type(level) == "string" and level or level:ToString()
+        log("RECHARGEMENT du niveau " .. name .. " (touche F) | Keith " .. keith_position_text())
+        library:OpenLevel(pawn, FName(name), true, "")
+    end)
+
+    if not ok then
+        log("Rechargement impossible : " .. tostring(err))
+    end
+end
+
+local function install_reset_hooks()
+
+    if RESET.installed then return end
+    RESET.installed = true
+
+    for _, entry in ipairs(RESET.hooks) do
+
+        local path, label, info_only = entry[1], entry[2], entry[3]
+
+        local ok, err = pcall(function()
+            RegisterHook(path, function()
+                if info_only then
+                    local n = (RESET.info_count[label] or 0) + 1
+                    RESET.info_count[label] = n
+                    if n == 1 or n % 50 == 0 then
+                        log(string.format("INFO %s appele (%d fois depuis le chargement du mod)", label, n))
+                    end
+                else
+                    world_mark_reset(label)
+                end
+                return nil
+            end)
+        end)
+
+        log(string.format("Hook reset %s %s", label, ok and "installe" or ("absent : " .. tostring(err))))
+    end
+
+    -- Cinematiques : toujours loguees ; arretees pendant la fenetre de saut
+    -- qui suit un F / Shift+F. Fonction native : pre-hook.
+    local ok, err = pcall(function()
+        RegisterHook("/Script/MovieScene.MovieSceneSequencePlayer:Play", function(Context)
+            local player = nil
+            pcall(function() player = Context:get() end)
+            local name = player and RESET.sequence_name(player) or "?"
+            local skip = TAS_CONFIG.skip_intro and RESET.window_until and TAS.Frame <= RESET.window_until
+            log(string.format("SEQUENCE lancee : %s%s", name, skip and " -> sera arretee" or ""))
+            if skip and player then
+                RESET.queue[#RESET.queue + 1] = player
+            end
+        end)
+    end)
+
+    log("Hook MovieSceneSequencePlayer:Play " .. (ok and "installe" or ("absent : " .. tostring(err))))
+end
+
 local ActionHooksInstalled = false
 
 local function install_action_hooks()
@@ -5409,6 +6361,7 @@ local function try_initialize()
     install_diag_hooks()
     install_camera_hooks()
     apply_fixed_timestep()
+    install_reset_hooks()
     install_forward_hook()
     install_right_hook()
     install_action_hooks()
@@ -5476,6 +6429,7 @@ local function install_level_hook()
                 function() end,
                 function()
                     TAS.NeedsReset = true
+                    world_mark_reset("PlayerController:ClientRestart")
                 end
             )
         end
@@ -5528,6 +6482,33 @@ RegisterKeyBind(
     Key.V,
     function()
         TAS.ModeRequest = "probe"
+    end
+)
+
+-- C : releve de reference du monde, avant un reset (touche R du jeu).
+-- Libre dans le jeu, chez NoWalls, et a la meme place en AZERTY / QWERTY.
+RegisterKeyBind(
+    Key.C,
+    function()
+        TAS.ModeRequest = "worldref"
+    end
+)
+
+-- F (la lettre, pas une touche de fonction) : reset de l'etat du monde,
+-- Keith garde sa position. Shift+F : etat + position de C. Plus aucune lettre
+-- n'est libre (jeu, NoWalls, mod), d'ou le modificateur.
+RegisterKeyBind(
+    Key.F,
+    function()
+        TAS.ModeRequest = "reload_state"
+    end
+)
+
+RegisterKeyBind(
+    Key.F,
+    { ModifierKey.SHIFT },
+    function()
+        TAS.ModeRequest = "reload_pos"
     end
 )
 
