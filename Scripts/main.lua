@@ -62,6 +62,7 @@ TAS_CONFIG = {
     -- enqueter sur un drift, avec diag_trace et world_survey.
     -- Build -52 : recoupe, le micro-drift des builds -44 a -50 est corrige
     -- (voir SESSION .md). true pour une nouvelle enquete.
+    -- Build -56 : recoupe, reprise validee (build -55).
     debug_log    = false,
 
     -- Dumps par frame de l'enquete sur le saut et le sprint (AIR, FENETRE) :
@@ -74,6 +75,7 @@ TAS_CONFIG = {
     -- false pour tout couper si les crashs reviennent.
     -- Coupe par defaut depuis le build -42 : c'est le plus couteux en jeu.
     -- Build -52 : recoupe avec debug_log.
+    -- Build -56 : recoupe, reprise validee (build -55).
     diag_trace   = false,
 
     -- Instantane des variables de Keith toutes les N frames, en plus des
@@ -159,7 +161,7 @@ KEY_DISPLAY_FRAMES = 30
 -- Marqueur de version : loggue au chargement et affiche par F8.
 -- A incrementer a chaque modification, pour verifier que le jeu charge
 -- bien le fichier copie et non une version restee en place.
-TAS_BUILD = "2026-09-10-52"
+TAS_BUILD = "2026-09-10-56"
 
 TAS = {
     Frame = 0,
@@ -2319,8 +2321,16 @@ local function tas_tick()
     -- TAS.Frame compte les frames du MONDE : en pause, ni lui ni
     -- l'enregistreur n'avancent, voir SLOW.
     if SLOW.gate() then
+        -- Premiere frame du monde apres une pause : jeter l'entree de
+        -- mouvement accumulee pendant les frames figees (SLOW.flush_input).
+        if SLOW.frozen then
+            SLOW.frozen = false
+            SLOW.flush_input()
+        end
         TAS.Frame = TAS.Frame + 1
         recorder_tick()
+    else
+        SLOW.frozen = true
     end
 
     ----------------------------------------------------
@@ -3951,6 +3961,94 @@ local function start_replay()
     replay_step()
 end
 
+-- B pendant un PLAY (build -53) : le rejeu passe la main au joueur, sans
+-- recharger. La prise garde les frames deja rejouees et continue en REC a
+-- la meme frame ; N rejouera le tout depuis le debut de la prise.
+--
+-- A la frame p, avant replay_step(p) : le rejeu a pose les axes et la
+-- camera des frames 0..p-1, et deja declenche les touches notees a p (une
+-- frame d'avance, voir replay_step). On garde donc les frames 0..p-1 et les
+-- touches de p ; le reste sera note par le REC.
+--
+-- Une touche que le rejeu tient et que le joueur ne tient pas (ou
+-- l'inverse) : le jeu ne verrait jamais ce changement, la vraie touche n'a
+-- pas bouge pour lui. inject_paused_keys le declenche et le note a p+1,
+-- comme sur une frame avancee en pause.
+local function takeover_recording()
+
+    local rec = TAS.Rec
+    local frame = TAS.Frame - TAS.PlayStart
+
+    if not rec or not TAS.PlayByKeys or TAS.ReplayOff.Actions then
+        stop_replay("B : reprise impossible, prise sans touches")
+        return
+    end
+
+    local events, count = {}, 0
+
+    for f, entry in pairs(rec.events) do
+
+        local kept
+
+        if f < frame then
+            kept = entry
+        elseif f == frame then
+            for channel, value in pairs(entry) do
+                if ACTION_BY_KEY[channel] then
+                    kept = kept or {}
+                    kept[channel] = value
+                end
+            end
+        end
+
+        if kept then
+            events[f] = kept
+            for _ in pairs(kept) do count = count + 1 end
+        end
+    end
+
+    -- Base du REC : l'etat rejoue, pour ne noter que les vrais changements.
+    local last = {}
+
+    for channel, value in pairs(TAS.PlayState or {}) do
+        last[channel] = value
+    end
+
+    for channel in pairs(ACTION_BY_KEY) do
+        if TAS.PlayKeys[channel] ~= nil then
+            last[channel] = TAS.PlayKeys[channel]
+        end
+    end
+
+    rec.events = events
+    rec.count = count
+
+    local dropped = DIAG.random_prune(rec)
+
+    diag_end("play")
+
+    TAS.Mode = "rec"
+    TAS.RecStart = TAS.PlayStart
+    TAS.RecLast = last
+    TAS.PlayState = false
+    TAS.PlayJump = false
+    TAS.PlayGait = false
+    TAS.PlayKeys = {}
+    TAS.DbgWatch = {}
+    TAS.DbgKeys = {}
+
+    inject_paused_keys()
+
+    record_value("MoveForward", TAS.Forward)
+    record_value("MoveRight", TAS.Right)
+    poll_channels()
+
+    diag_begin("takeover")
+
+    log(string.format("REC repris pendant le rejeu a la frame %d : %d frames gardees, %d valeurs de hasard a renoter",
+        frame, frame, dropped))
+end
+
 ----------------------------------------------------------
 -- SONDE INPUT (touche V), en trois etapes successives
 --
@@ -4272,6 +4370,9 @@ function recorder_tick()
                 return
             elseif TAS.Mode == "rec" then
                 stop_recording()
+                return
+            elseif TAS.Mode == "play" then
+                takeover_recording()
                 return
             end
         elseif request == "play" then
@@ -5600,6 +5701,34 @@ local function write_scalar(obj, name, want)
     return back == want
 end
 
+-- Build -55 : entree de mouvement accumulee pendant la pause. En pause, le
+-- PlayerController traite encore les entrees a chaque frame moteur (24 fois
+-- par frame du monde, mesure) et PlayerMovementInput ajoute a chaque fois au
+-- ControlInputVector de Keith, que son mouvement ne consomme pas tant que le
+-- monde est fige. A la reprise, ce stock deplacait Keith alors que la touche
+-- valait 0 (reprise d'un rejeu a la frame 841 : drift au PLAY suivant, qui
+-- n'avait pas de pause). On le vide au debut de la frame du monde qui suit
+-- une pause, avant que le jeu traite les entrees de cette frame. Ecrire le
+-- vecteur plutot que ConsumeMovementInputVector, qui changerait aussi
+-- LastControlInputVector.
+function SLOW.flush_input()
+
+    local pawn = get_player_pawn()
+
+    if not pawn then return end
+
+    local before = "?"
+
+    pcall(function()
+        local v = pawn.ControlInputVector
+        before = string.format("%.3f %.3f %.3f", v.X, v.Y, v.Z)
+    end)
+
+    local ok = write_struct(pawn, "ControlInputVector", { X = 0, Y = 0, Z = 0 })
+
+    dbg("PAUSE : entree de mouvement accumulee jetee (%s) -> %s", before, ok and "ok" or "ECHEC")
+end
+
 local function write_timeline(obj, name, want)
 
     local ok_t, timeline = pcall(function() return obj[name] end)
@@ -5686,6 +5815,23 @@ function diag_begin(mode)
     DIAG.dt_max = 0
     DIAG.dt_irregular = 0
     DIAG.dt_diffs = 0
+
+    -- Reprise d'un rejeu par B (build -54) : la reference REC des frames
+    -- deja rejouees est celle de la prise d'origine, encore en memoire ; on
+    -- n'oublie que la suite, que le REC repris va noter a nouveau.
+    if mode == "takeover" then
+        local from = TAS.Frame - TAS.RecStart
+        for _, tbl in ipairs({ DIAG.rec_trace, DIAG.rec_snaps, DIAG.rec_track }) do
+            local drop = {}
+            for f in pairs(tbl or {}) do
+                if type(f) == "number" and f >= from then drop[#drop + 1] = f end
+            end
+            for _, f in ipairs(drop) do tbl[f] = nil end
+        end
+        dbg("DIAG : reprise a la frame %d, reference REC gardee avant, renotee apres%s", from,
+            DIAG.rec_snaps and DIAG.rec_snaps[0] and "" or " (aucune reference en memoire : prise relue du fichier)")
+        return
+    end
 
     if mode == "rec" then
         DIAG.rec_trace = {}
@@ -6968,6 +7114,29 @@ function RANDOM.key(name, fn)
     return base .. "|" .. n
 end
 
+-- Reprise d'un rejeu par B (build -53) : les appels deja rejoues gardent
+-- leur valeur, ceux qui n'ont pas encore eu lieu seront notes a nouveau par
+-- le REC. Rend le nombre de valeurs retirees.
+function DIAG.random_prune(rec)
+
+    if type(rec.random) ~= "table" then return 0 end
+
+    local drop = {}
+
+    for key in pairs(rec.random) do
+        local base, n = key:match("^(.*)|(%d+)$")
+        if not base or tonumber(n) > (RANDOM.counts[base] or 0) then
+            drop[#drop + 1] = key
+        end
+    end
+
+    for _, key in ipairs(drop) do
+        rec.random[key] = nil
+    end
+
+    return #drop
+end
+
 function RANDOM.capture(owner)
 
     local cls = "?"
@@ -7911,7 +8080,7 @@ log(
     "EngineTickAvailable = " ..
     tostring(EngineTickAvailable)
 )
-log("B = Enregistrer / arreter")
+log("B = Enregistrer / arreter (pendant un PLAY : reprendre la main)")
 log("N = Rejouer / arreter")
 log("V = Sonde input en 3 etapes (touches, saut, sprint)")
 log("L = Afficher / masquer le HUD")
