@@ -56,7 +56,13 @@ TAS_CONFIG = {
 
     -- Logs de diagnostic automatiques pendant REC, PLAY et la sonde V.
     -- Volontairement bavards ; false pour les couper.
-    debug_log    = true,
+    --
+    -- Build -42 : coupe par defaut une fois le rejeu valide (plusieurs
+    -- lignes par frame, la console UE4SS ralentissait le jeu). true pour
+    -- enqueter sur un drift, avec diag_trace et world_survey.
+    -- Build -52 : recoupe, le micro-drift des builds -44 a -50 est corrige
+    -- (voir SESSION .md). true pour une nouvelle enquete.
+    debug_log    = false,
 
     -- Dumps par frame de l'enquete sur le saut et le sprint (AIR, FENETRE) :
     -- utiles pour une nouvelle enquete, trop couteux en temps normal.
@@ -66,7 +72,9 @@ TAS_CONFIG = {
     -- Keith, instantanes de ses variables, appels aux timelines et
     -- detecteur de drift. Tres bavard, plusieurs centaines de hooks :
     -- false pour tout couper si les crashs reviennent.
-    diag_trace   = true,
+    -- Coupe par defaut depuis le build -42 : c'est le plus couteux en jeu.
+    -- Build -52 : recoupe avec debug_log.
+    diag_trace   = false,
 
     -- Instantane des variables de Keith toutes les N frames, en plus des
     -- evenements (saut, timeline, MovementState). Plus petit = divergence
@@ -93,7 +101,12 @@ TAS_CONFIG = {
     -- Releve de l'etat du monde (build -22) : tous les acteurs du niveau au
     -- debut et a la fin du REC et du PLAY, compares dans le log (MONDE ...).
     -- Premiere etape d'un savestate du monde. false pour le couper.
-    world_survey = true,
+    -- Coupe par defaut depuis le build -42 : les resets (F, Shift+F, N) n'en
+    -- ont pas besoin, seules les comparaisons de diagnostic s'en servent.
+    -- Build -49 : recoupe. Le releve des 6 222 acteurs au depart du PLAY a
+    -- fait planter UE4SS (acces memoire invalide) ; la ligne HORLOGE suffit
+    -- a verifier le calage du monde.
+    world_survey = false,
 
     -- Apres un reset (F / Shift+F), arreter les cinematiques en cours :
     -- l'animation du debut ne sert a rien pour un TAS.
@@ -116,9 +129,10 @@ TAS_CONFIG = {
     rec_from_reset = true,
 
     -- N attend, apres son rechargement, le meme delai que B apres le dernier
-    -- chargement, pour que le decor anime soit au meme point. Au-dela de ce
-    -- nombre de secondes, N demarre au bout de 5 s. Build -41 : 30 s etait
-    -- trop long a l'usage ; faire F juste avant B donne un rejeu exact et rapide.
+    -- chargement, pour que le decor anime soit au meme point. Build -43 : si
+    -- B arrive plus de play_max_wait secondes apres le dernier chargement, B
+    -- fait lui-meme un F et demarre le REC ~5 s apres ; le rejeu est exact
+    -- dans les deux cas. 30 s d'attente, au build -36, etait trop long.
     play_max_wait = 10,
 
     -- key_hooks : DESACTIVE, et ce n'est pas un reglage de confort.
@@ -145,7 +159,7 @@ KEY_DISPLAY_FRAMES = 30
 -- Marqueur de version : loggue au chargement et affiche par F8.
 -- A incrementer a chaque modification, pour verifier que le jeu charge
 -- bien le fichier copie et non une version restee en place.
-TAS_BUILD = "2026-09-10-41"
+TAS_BUILD = "2026-09-10-52"
 
 TAS = {
     Frame = 0,
@@ -2556,6 +2570,10 @@ local function record_value(channel, value)
     -- jeu. Enregistres, mais plus logues.
     if not QUIET_CHANNELS[channel] then
         dbg("REC %s = %s", channel, tostring(value))
+    elseif TAS.RecLast.KeyMMB and channel:find("^Look") then
+        -- Molette tenue : la souris redimensionne l'objet, a comparer avec
+        -- les lignes "LOOK ... rejoue" du PLAY.
+        dbg("REC %s = %.4f (molette tenue)", channel, value)
     end
 end
 
@@ -2685,6 +2703,66 @@ local function fire_action(fn, key_name)
     return ok
 end
 
+-- Actions en attente (build -46). Declenchees depuis le tick du mod, elles
+-- partaient AVANT que le monde avance, l'horloge du jeu encore sur la frame
+-- precedente : tout ce qu'une action lance avec un delai (transition de
+-- visee, minuterie) partait une frame trop tot au rejeu. Mesure du build
+-- -45 : Timeline:Play a 3275 en PLAY contre 3276 en REC, 30 frames apres un
+-- appui sur le clic droit, puis drift de Keith. Les actions sont donc mises
+-- en file, et le hook d'axe du controleur les declenche pendant le
+-- traitement des entrees de la frame, la ou le jeu traite une vraie touche.
+local PENDING_ACTIONS = { list = {}, fallback = 0 }
+
+function PENDING_ACTIONS.queue(fn, key_name)
+    local list = PENDING_ACTIONS.list
+    list[#list + 1] = { fn, key_name }
+end
+
+-- Mouvements de souris rejoues (evenements d'axe de Keith), build -47 : mis
+-- dans la meme file, APRES les actions de la frame, comme le jeu les traite
+-- en REC. Joues depuis le tick, ils passaient avant l'appui molette
+-- (declenche, lui, pendant les entrees) : une frame d'echelle en trop,
+-- ScaleModifier 1,0131 contre 1,0114, objet repose plus grand, drift.
+function PENDING_ACTIONS.queue_look(fn, value, channel)
+    local list = PENDING_ACTIONS.list
+    list[#list + 1] = { look = true, fn = fn, value = value, channel = channel }
+end
+
+-- source : "axe" (hook d'axe, cas normal) ou un repli.
+function PENDING_ACTIONS.flush(source)
+
+    local list = PENDING_ACTIONS.list
+
+    if #list == 0 then return end
+
+    PENDING_ACTIONS.list = {}
+
+    for _, item in ipairs(list) do
+        if item.look then
+            local pawn = get_player_pawn()
+            if pawn and not DIAG.look_off then
+                local ok, err = pcall(function() pawn[item.fn](pawn, item.value) end)
+                if not ok then
+                    DIAG.look_off = true
+                    log("Rejeu des axes souris impossible : " .. tostring(err))
+                elseif TAS.PlayKeyState and TAS.PlayKeyState.KeyMMB then
+                    dbg("LOOK %s rejoue %.4f (molette tenue)", item.channel, item.value)
+                end
+            end
+        else
+            fire_action(item[1], item[2])
+        end
+    end
+
+    if source ~= "axe" then
+        PENDING_ACTIONS.fallback = PENDING_ACTIONS.fallback + 1
+        if PENDING_ACTIONS.fallback <= 20 then
+            log(string.format("ACTIONS declenchees en repli, %s : %d action(s), aucun evenement d'axe dans la frame",
+                source, #list))
+        end
+    end
+end
+
 -- Frame avancee par V pendant un REC en pause (build -39). Le jeu perd les
 -- appuis faits pendant la pause (mesure du build -38 : Espace note appuye a
 -- la frame 247, Keith ne saute pas en REC, saute en PLAY). On declenche donc
@@ -2716,7 +2794,7 @@ local function inject_paused_keys()
             local fn = action and (down and action.press or action.release)
 
             if fn then
-                fire_action(fn, action.key)
+                PENDING_ACTIONS.queue(fn, action.key)
             end
 
             local event = TAS.Rec.events[target]
@@ -2770,7 +2848,7 @@ local function replay_keys()
             if previous ~= nil or want == true then
                 local fn = want and action.press or action.release
                 if fn then
-                    fire_action(fn, action.key)
+                    PENDING_ACTIONS.queue(fn, action.key)
                 end
             end
         end
@@ -3278,11 +3356,22 @@ local function save_recording(rec)
     -- Prise faite depuis un reset : de quoi recharger le meme monde.
     if rec.save_hex then
         out[#out + 1] = string.format("    start_offset = %d,", rec.start_offset or 0)
+        if rec.start_world then
+            out[#out + 1] = string.format("    start_world = %d,", rec.start_world)
+        end
+        if type(rec.decor) == "table" and next(rec.decor) then
+            out[#out + 1] = "    decor = " .. lua_table(rec.decor) .. ","
+        end
         out[#out + 1] = string.format("    save_hex = %q,", rec.save_hex)
     end
 
     if rec.reset_pose then
         out[#out + 1] = "    reset_pose = " .. lua_table(rec.reset_pose) .. ","
+    end
+
+    -- Hasard du monde note en REC, reimpose en PLAY (build -45).
+    if rec.random then
+        out[#out + 1] = "    random = " .. lua_table(rec.random) .. ","
     end
 
     if rec.pose then
@@ -3345,6 +3434,71 @@ local function save_recording(rec)
 
         log("Ecriture impossible dans " .. path .. " : " .. tostring(err))
     end
+end
+
+-- Build -51 : decor fixe dont la place varie d'un chargement a l'autre. Le
+-- TutorialScreen finit a -6660,329 ou -6660,383 selon le chargement (deja a
+-- la fin de l'intro, horloge du monde identique) ; Keith le heurte vers la
+-- frame 5635 et le choc part de 7 u/s de travers. On note sa place au
+-- depart du REC et on la reimpose au depart du PLAY.
+-- Indexe par nom d'acteur : lua_table ecrit toutes les cles en chaines, une
+-- liste 1, 2, 3 reviendrait vide du fichier.
+DIAG.decor_classes = { "ShutterScreen_C" }
+
+function DIAG.decor_capture()
+
+    local wanted = {}
+
+    for _, class in ipairs(DIAG.decor_classes) do
+        pcall(function()
+            for _, actor in ipairs(FindAllOf(class) or {}) do
+                if is_alive(actor) then
+                    local p, r = actor:K2_GetActorLocation(), actor:K2_GetActorRotation()
+                    wanted[actor:GetFName():ToString()] = {
+                        x = p.X, y = p.Y, z = p.Z,
+                        pitch = r.Pitch, yaw = r.Yaw, roll = r.Roll
+                    }
+                end
+            end
+        end)
+    end
+
+    return wanted
+end
+
+function DIAG.decor_apply(wanted)
+
+    if type(wanted) ~= "table" or not next(wanted) then return end
+
+    local total = 0
+    for _ in pairs(wanted) do total = total + 1 end
+
+    local moved, before, after = 0, 0, 0
+
+    local function distance(actor, item)
+        local p = actor:K2_GetActorLocation()
+        return math.sqrt((p.X - item.x) ^ 2 + (p.Y - item.y) ^ 2 + (p.Z - item.z) ^ 2)
+    end
+
+    for _, class in ipairs(DIAG.decor_classes) do
+        pcall(function()
+            for _, actor in ipairs(FindAllOf(class) or {}) do
+                local item = is_alive(actor) and wanted[actor:GetFName():ToString()]
+                if item then
+                    before = math.max(before, distance(actor, item))
+                    actor:K2_SetActorLocationAndRotation(
+                        { X = item.x, Y = item.y, Z = item.z },
+                        { Pitch = item.pitch, Yaw = item.yaw, Roll = item.roll },
+                        false, {}, true)
+                    after = math.max(after, distance(actor, item))
+                    moved = moved + 1
+                end
+            end
+        end)
+    end
+
+    log(string.format("DECOR : %d / %d elements remis a leur place du REC (ecart avant %.4f u, apres %.4f u)",
+        moved, total, before, after))
 end
 
 local function load_recording()
@@ -3546,6 +3700,9 @@ end
 
 local function stop_replay(reason)
 
+    -- Rejeu fini : les actions encore en attente n'ont plus lieu d'etre.
+    PENDING_ACTIONS.list = {}
+
     release_sprint()
     release_keys()
 
@@ -3570,31 +3727,20 @@ end
 -- nous-memes avec la valeur du REC. Appele avant apply_camera : le
 -- AddControllerPitchInput qu'il declenche recoit 0 (hook camera), donc la
 -- camera reste celle de la prise.
+-- Build -47 : mis en file derriere les actions, joues pendant le traitement
+-- des entrees (voir PENDING_ACTIONS.queue_look). L'injection de camera se
+-- fait une seule fois par frame, sur le premier AddController*Input : que ce
+-- soit cet appel ou celui du jeu, la rotation obtenue est la meme.
 local function replay_look()
 
     if DIAG.look_off then return end
-
-    local pawn = get_player_pawn()
-
-    if not pawn then return end
 
     for channel, fn in pairs(LOOK_EVENTS) do
 
         local value = TAS.PlayState[channel]
 
         if type(value) == "number" and value ~= 0 then
-
-            local ok, err = pcall(function() pawn[fn](pawn, value) end)
-
-            if not ok then
-                DIAG.look_off = true
-                log("Rejeu des axes souris impossible : " .. tostring(err))
-                return
-            end
-
-            if TAS.PlayKeyState and TAS.PlayKeyState.KeyMMB then
-                dbg("LOOK %s rejoue %.4f (molette tenue)", channel, value)
-            end
+            PENDING_ACTIONS.queue_look(fn, value, channel)
         end
     end
 end
@@ -3701,6 +3847,17 @@ local function start_recording()
         DIAG.rec_setup = false
     end
 
+    -- Build -49 : horloge du monde au depart, en frames. Au build -48, le
+    -- PLAY demarrait 720 frames apres le chargement comme le REC, mais le
+    -- monde avait 1000 frames d'age contre 1006 : decor anime decale.
+    -- N attend que le monde ait le meme age.
+    if TAS.Rec.save_hex then
+        local pawn = get_player_pawn()
+        local seconds = pawn and game_time(pawn)
+        TAS.Rec.start_world = seconds and math.floor(seconds * 140 + 0.5) or nil
+        TAS.Rec.decor = DIAG.decor_capture()
+    end
+
     TAS.RecStart = TAS.Frame
     TAS.RecLast = {}
     TAS.Mode = "rec"
@@ -3775,6 +3932,7 @@ local function start_replay()
         or "Rejeu des actions : prise sans touches, repli sur les effets")
     TAS.PlayStart = TAS.Frame
 
+    DIAG.decor_apply(rec.decor)
     restore_pose(rec.pose)
 
     TAS.Mode = "play"
@@ -4151,6 +4309,10 @@ function recorder_tick()
         diag_cut()
     end
 
+    -- Repli : actions de la frame precedente que le hook d'axe n'a pas
+    -- declenchees (entrees coupees, cinematique).
+    PENDING_ACTIONS.flush("tick suivant")
+
     if TAS.Mode == "rec" then
         poll_channels()
     elseif TAS.Mode == "play" then
@@ -4223,6 +4385,10 @@ end
 local function axis_hook(channel, field)
 
     return function(Context, AxisValue)
+
+        -- Actions en attente : on est dans le traitement des entrees de la
+        -- frame, a l'heure du monde de cette frame (voir PENDING_ACTIONS).
+        PENDING_ACTIONS.flush("axe")
 
         -- RemoteUnrealParam:Get() est confirme sur
         local value = AxisValue:Get()
@@ -4633,6 +4799,16 @@ local function install_diag_hooks()
                     local timeline = Context:get()
                     owner = timeline:GetFName():ToString()
                     pos = string.format("%.3f", timeline:GetPlaybackPosition())
+                    -- Build -47 : "Timeline" seul ne dit pas quel acteur
+                    -- (PlayFromStart a 1937 en PLAY contre 3029 en REC).
+                    local actor = timeline:GetOwner()
+                    if is_alive(actor) then
+                        -- Sans le numero d'instance (Keith_BP_C_2147481903) :
+                        -- il change a chaque chargement et la comparaison
+                        -- REC / PLAY signalait des ecarts qui n'en sont pas.
+                        local actor_name = actor:GetFName():ToString():gsub("_C_%d+$", "")
+                        owner = actor_name .. "." .. owner
+                    end
                     playing = tostring(timeline:IsPlaying())
                 end)
 
@@ -5094,11 +5270,15 @@ function time_report()
     local pawn = get_player_pawn()
     local dt = pawn and world_delta(pawn) or nil
 
+    -- La mesure sert toujours (ligne M, garde-fou du pas fixe) ; la ligne de
+    -- log, seulement pour enqueter.
+    if TAS_CONFIG.debug_log then
     log(string.format("TEMPS : %d frames en %d s = %.0f fps reels | dt du jeu %s | vitesse du jeu x%s | pas fixe moteur %s",
         frames, secs, fps,
         dt and string.format("%.7f s", dt) or "?",
         dt and string.format("%.2f", fps * dt) or "?",
         DIAG.fixed_on and "actif" or "inactif"))
+    end
 
     -- Garde-fou : le pas fixe ne doit jamais accelerer le jeu.
     if DIAG.fixed_on and dt and fps * dt > 1.25 then
@@ -5691,6 +5871,10 @@ local WORLD_LINES = 40
 local WorldClassInfo = {}   -- nom court de classe -> { bp, skip }
 local WorldProps = {}       -- nom court de classe -> variables suivies
 
+-- Hasard du monde (build -45), voir RANDOM.on_call. Declare ici : world_event
+-- s'en sert et vient avant.
+local RANDOM = { counts = {}, injected = 0, logged = 0 }
+
 local function world_class_info(actor, short_class)
 
     local info = WorldClassInfo[short_class]
@@ -5935,6 +6119,14 @@ local function world_diff(a, b, label)
 end
 
 function world_event(kind)
+
+    -- Hasard du monde : les appels sont comptes depuis le debut de la prise,
+    -- en REC comme en PLAY, pour les apparier dans le meme ordre.
+    if kind == "rec_start" or kind == "play_start" then
+        RANDOM.counts, RANDOM.injected, RANDOM.logged = {}, 0, 0
+    elseif kind == "play_stop" then
+        log(string.format("HASARD : %d valeurs du monde reimposees pendant ce rejeu", RANDOM.injected))
+    end
 
     if not TAS_CONFIG.world_survey then return end
 
@@ -6190,7 +6382,11 @@ end
 -- chargement. snap : releve deja pris (debut du REC), pour ne pas le refaire.
 function world_reference(snap, source)
 
-    snap = snap or world_snapshot()
+    -- Le releve du monde ne sert qu'aux comparaisons de diagnostic : sans
+    -- world_survey, la reference se limite a la sauvegarde et a Keith.
+    if not snap and TAS_CONFIG.world_survey then
+        snap = world_snapshot()
+    end
 
     RESET.auto_pending = false
     DIAG.reset_frame = false
@@ -6202,7 +6398,7 @@ function world_reference(snap, source)
 
     log(string.format("MONDE reference prise (%s) : %s | Keith %s | %s frames apres le chargement",
         source or "touche C",
-        snap and string.format("%d acteurs dont %d Blueprint", snap.count, snap.bp) or "releve impossible",
+        snap and string.format("%d acteurs dont %d Blueprint", snap.count, snap.bp) or "sans releve du monde",
         keith_position_text(), tostring(DIAG.ref_offset or "?")))
 
     SAVE.backup()
@@ -6320,10 +6516,45 @@ function RESET.skip_intro()
     end
 end
 
+-- Build -48 : horloge du monde et position du TutorialScreen. En -47, Keith
+-- le heurte a la frame 5250 dans les deux passes, mais l'ecran etait deja
+-- decale de 0,07 u au depart du PLAY : le drift vient de la. Compter les
+-- frames depuis ClientRestart ne suffit peut-etre pas si le monde a demarre
+-- son horloge plus tot ou plus tard selon le chargement.
+-- Sans l'ecran pendant le chargement lui-meme : parcourir les acteurs juste
+-- apres un rechargement a deja fait planter UE4SS (UStruct::IsChildOf).
+function RESET.clock_text(without_screen)
+
+    local parts = {}
+
+    -- Sans pawn, game_time echouerait et se couperait pour de bon.
+    local pawn = get_player_pawn()
+    local seconds = pawn and game_time(pawn)
+    parts[#parts + 1] = seconds and string.format("temps monde %.4f s (%.1f frames)", seconds, seconds * 140)
+        or "temps monde ?"
+
+    if without_screen then return parts[1] end
+
+    pcall(function()
+        for _, actor in ipairs(FindAllOf("ShutterScreen_C") or {}) do
+            if is_alive(actor) and actor:GetFName():ToString() == "TutorialScreen" then
+                local p = actor:K2_GetActorLocation()
+                parts[#parts + 1] = string.format("TutorialScreen %.3f %.3f %.3f", p.X, p.Y, p.Z)
+            end
+        end
+    end)
+
+    return table.concat(parts, " | ")
+end
+
 -- Appele par les hooks : pur Lua, le releve est fait plus tard par world_tick.
 function world_mark_reset(source)
 
     log(string.format("RESET detecte : %s (frame %d)", source, TAS.Frame))
+
+    if source == "PlayerController:ClientRestart" and TAS_CONFIG.debug_log then
+        log("HORLOGE au chargement : " .. RESET.clock_text(true))
+    end
 
     -- Le chargement du niveau est l'origine qui compte : les comparaisons
     -- se font a la meme frame de jeu que la touche C apres le chargement.
@@ -6373,8 +6604,8 @@ function world_tick()
                 pcall(function() playing = is_alive(player) and player:IsPlaying() end)
                 if not playing then
                     RESET.fast[name] = nil
-                    log(string.format("INTRO : %s terminee a +%d frames du chargement | Keith %s",
-                        name, since, keith_position_text()))
+                    log(string.format("INTRO : %s terminee a +%d frames du chargement | Keith %s | %s",
+                        name, since, keith_position_text(), RESET.clock_text()))
                     if RESET.pose then
                         restore_pose(RESET.pose)
                         log("INTRO : Keith remis apres la cinematique | " .. keith_position_text())
@@ -6393,10 +6624,34 @@ function world_tick()
     if RESET.pending_start then
         if RESET.start_load then
             local since = TAS.Frame - RESET.start_load
+            local ready = since >= RESET.offset_now
+            local world, target
+
+            -- Build -49 : le PLAY part quand le monde a le meme age qu'au
+            -- depart du REC (horloge du monde), pas au meme nombre de frames
+            -- depuis ClientRestart : l'ecart entre les deux varie d'un
+            -- chargement a l'autre (6 frames au build -48). Repli sur le
+            -- nombre de frames si l'horloge ne repond pas ou n'arrive pas.
+            if RESET.pending_start == "play" and TAS.Rec and TAS.Rec.start_world then
+                local pawn = get_player_pawn()
+                local seconds = pawn and game_time(pawn)
+                if seconds then
+                    world = math.floor(seconds * 140 + 0.5)
+                    target = TAS.Rec.start_world
+                    ready = (since >= RESET.min_offset and world >= target)
+                        or since >= RESET.offset_now + RESET.window
+                end
+            end
+
             DIAG.hud_status = string.format("%s dans %.1f s",
                 RESET.pending_start == "rec" and "REC" or "PLAY",
-                math.max(RESET.offset_now - since, 0) / 140)
-            if since >= RESET.offset_now then
+                math.max(target and world and (target - world) or (RESET.offset_now - since), 0) / 140)
+            if ready then
+                if target then
+                    log(string.format("PLAY cale sur l'horloge du monde : %d frames (REC %d, ecart %d)%s",
+                        world, target, world - target,
+                        world < target and " -- delai maximal atteint, depart sans calage" or ""))
+                end
                 local kind = RESET.pending_start
                 RESET.pending_start = false
                 DIAG.hud_status = false
@@ -6406,8 +6661,8 @@ function world_tick()
                 RESET.fast = {}
                 RESET.pose = false
                 DIAG.reset_frame = false
-                log(string.format("%s demarre %d frames apres le chargement | Keith %s",
-                    kind == "rec" and "REC" or "PLAY", since, keith_position_text()))
+                log(string.format("%s demarre %d frames apres le chargement | Keith %s | HORLOGE %s",
+                    kind == "rec" and "REC" or "PLAY", since, keith_position_text(), RESET.clock_text()))
                 if kind == "rec" then
                     start_recording()
                 else
@@ -6616,21 +6871,40 @@ function reset_session(kind)
         -- dernier chargement ; N rechargera et rejouera au meme delai.
         local since = DIAG.last_load_frame and (TAS.Frame - DIAG.last_load_frame) or nil
         local max_offset = (TAS_CONFIG.play_max_wait or 10) * 140
-        local exact = since ~= nil and since <= max_offset
-        local offset = exact and math.max(since, RESET.min_offset) or RESET.start_offset
 
+        -- B peu apres un chargement : REC tout de suite. N rejouera au meme
+        -- delai apres son rechargement, le decor anime sera au meme point.
+        if since ~= nil and since <= max_offset then
+
+            DIAG.rec_setup = {
+                save_hex = SAVE.to_hex(data),
+                reset_pose = pose,
+                start_offset = math.max(since, RESET.min_offset)
+            }
+
+            log(string.format("REC : sauvegarde et Keith joints a la prise ; N rechargera et rejouera %d frames apres le chargement, meme delai que ce REC",
+                DIAG.rec_setup.start_offset))
+
+            -- REC classique, tout de suite : start_recording joint rec_setup.
+            return false
+        end
+
+        -- Build -43, a la demande de l'utilisateur : B trop loin du dernier
+        -- chargement fait un F automatique. Au build -42, N demarrait alors
+        -- a un delai standard et le decor anime (ponts, capsule-porte) etait
+        -- decale : micro-drift sur une prise longue. Ici le monde est
+        -- recharge avec la sauvegarde ACTUELLE, Keith garde sa position et
+        -- son etat, et le REC demarre a start_offset frames du chargement ;
+        -- N rejouera au meme delai. Suite commune plus bas.
+        RESET.offset_now = RESET.start_offset
         DIAG.rec_setup = {
             save_hex = SAVE.to_hex(data),
             reset_pose = pose,
-            start_offset = offset
+            start_offset = RESET.offset_now
         }
 
-        log(string.format("REC : sauvegarde et Keith joints a la prise ; N rechargera et rejouera %d frames apres le chargement%s",
-            offset, exact and " (meme delai que ce REC depuis le dernier chargement)"
-                or " (delai standard : dernier chargement trop ancien, les elements animes du monde pourront differer)"))
-
-        -- REC classique, tout de suite : start_recording joint rec_setup.
-        return false
+        log(string.format("REC : dernier chargement il y a %s, F automatique puis REC %d frames apres le rechargement",
+            since and string.format("%.0f s", since / 140) or "?", RESET.offset_now))
     else
 
         local rec = TAS.Rec or load_recording()
@@ -6670,6 +6944,138 @@ function reset_session(kind)
     return true
 end
 
+----------------------------------------------------------
+-- HASARD DU MONDE (build -45)
+--
+-- Mesure du build -44 : les 13 ponts (BP_Bridge_Straight*) se declenchent a
+-- la meme frame en REC et en PLAY (6856), mais chacun tire au hasard la
+-- vitesse de sa timeline (SetPlayRate 0,10 a 0,33) et ses rotations de
+-- depart. Le jeu n'expose aucun moyen de fixer ce hasard : les ponts
+-- s'assemblaient autrement, le decor se decalait, Keith derivait.
+--
+-- En REC, pour chaque timeline d'un acteur du monde, on note le parametre de
+-- SetPlayRate et les variables de l'acteur au moment de PlayFromStart. En
+-- PLAY, au meme appel du meme acteur, dans le meme ordre, on reimpose les
+-- memes valeurs (parametre reecrit dans le pre-hook, variables ecrites avant
+-- le demarrage de la timeline). Keith est exclu : sa pose le gere.
+----------------------------------------------------------
+
+-- Cle d'appariement : acteur, fonction, rang de l'appel depuis le debut.
+function RANDOM.key(name, fn)
+    local base = name .. "|" .. fn
+    local n = (RANDOM.counts[base] or 0) + 1
+    RANDOM.counts[base] = n
+    return base .. "|" .. n
+end
+
+function RANDOM.capture(owner)
+
+    local cls = "?"
+    pcall(function() cls = owner:GetFullName():match("^(%S+)") or "?" end)
+
+    local props = WorldProps[cls]
+
+    if props == nil then
+        props = resolve_props(owner, nil)
+        WorldProps[cls] = props
+    end
+
+    local vars = {}
+
+    for _, p in ipairs(props) do
+        if p.kind ~= "tl" then
+            local value = raw_value(owner, p.name, p.kind)
+            if value ~= nil then
+                vars[p.name] = { k = p.kind, v = value }
+            end
+        end
+    end
+
+    return vars
+end
+
+function RANDOM.apply(owner, vars)
+    local done = 0
+    for name, entry in pairs(vars) do
+        local ok
+        if type(entry.v) == "table" then
+            ok = write_struct(owner, name, entry.v)
+        else
+            ok = write_scalar(owner, name, entry.v)
+        end
+        if ok then done = done + 1 end
+    end
+    return done
+end
+
+-- Pre-hook natif de TimelineComponent:SetPlayRate / PlayFromStart.
+function RANDOM.on_call(fn, Context, Param)
+
+    if TAS.Mode ~= "rec" and TAS.Mode ~= "play" then return end
+
+    local rec = TAS.Rec
+
+    if not rec then return end
+
+    local owner, name = nil, nil
+
+    pcall(function()
+        owner = Context:get():GetOwner()
+        name = owner:GetFullName()
+    end)
+
+    if not is_alive(owner) or not name then return end
+
+    local pawn = get_player_pawn()
+    local pawn_name = ""
+
+    if pawn then
+        pcall(function() pawn_name = pawn:GetFullName() end)
+    end
+
+    if name == pawn_name then return end
+
+    local key = RANDOM.key(name, fn)
+
+    if TAS.Mode == "rec" then
+
+        rec.random = rec.random or {}
+        local entry = {}
+
+        if fn == "SetPlayRate" then
+            local ok, value = pcall(function() return Param:get() end)
+            if ok and type(value) == "number" then entry.p = value end
+        else
+            entry.vars = RANDOM.capture(owner)
+        end
+
+        rec.random[key] = entry
+        return
+    end
+
+    local entry = rec.random and rec.random[key]
+
+    if not entry then return end
+
+    local detail
+
+    if entry.p then
+        local ok, current = pcall(function() return Param:get() end)
+        pcall(function() Param:set(entry.p) end)
+        detail = string.format("vitesse %s -> %.5f", ok and tostring(current) or "?", entry.p)
+    elseif entry.vars then
+        detail = string.format("%d variables reecrites", RANDOM.apply(owner, entry.vars))
+    end
+
+    if detail then
+        RANDOM.injected = RANDOM.injected + 1
+        if RANDOM.logged < 40 then
+            RANDOM.logged = RANDOM.logged + 1
+            dbg("HASARD %s:%s : %s", short_name(name), fn, detail)
+        end
+    end
+end
+
 function install_reset_hooks()
 
     if RESET.installed then return end
@@ -6695,6 +7101,18 @@ function install_reset_hooks()
         end)
 
         log(string.format("Hook reset %s %s", label, ok and "installe" or ("absent : " .. tostring(err))))
+    end
+
+    -- Hasard du monde : toujours actif, independant du diagnostic.
+    for _, fn in ipairs({ "SetPlayRate", "PlayFromStart" }) do
+        local hooked = fn
+        local ok_r, err_r = pcall(function()
+            RegisterHook("/Script/Engine.TimelineComponent:" .. hooked, function(Context, Param)
+                RANDOM.on_call(hooked, Context, Param)
+            end)
+        end)
+        log(string.format("Hook hasard TimelineComponent:%s %s", hooked,
+            ok_r and "installe" or ("absent : " .. tostring(err_r))))
     end
 
     -- Cinematiques : toujours loguees ; arretees pendant la fenetre de saut
