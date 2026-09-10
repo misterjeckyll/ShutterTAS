@@ -44,6 +44,10 @@ local function debug(message)
 end
 
 
+-- Declare ici : is_valid est definie plus bas dans le fichier, et Lua
+-- resoudrait sinon l'appel sur un global nil.
+local is_valid
+
 local function inspect_widget_class(class_path)
 log("================================================")
 log("INSPECTING CLASS")
@@ -108,7 +112,7 @@ end
 -- Safe UObject helpers
 --============================================================
 
-local function is_valid(obj)
+function is_valid(obj)
     if obj == nil then
         return false
     end

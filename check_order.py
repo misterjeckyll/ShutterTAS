@@ -55,7 +55,15 @@ def check(path):
         "pairs", "next", "select", "error", "assert", "unpack", "require",
         "print", "rawget", "rawset", "rawequal", "rawlen", "setmetatable",
         "getmetatable", "collectgarbage", "load", "loadstring", "dofile",
+        "loadfile",
     }
+
+    known = set(defined)
+    for l in lines:
+        m = re.match(r"\s*local\s+([A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*)\s*=", l)
+        if m:
+            for name in re.split(r"\s*,\s*", m.group(1)):
+                known.add(name)
 
     missing = set()
     for i, l in enumerate(lines, 1):
@@ -64,7 +72,7 @@ def check(path):
         for name in re.findall(r"(?<![\w.:])([a-z][a-z0-9_]*)\s*\(", l):
             if "_" not in name and name in builtins:
                 continue
-            if name in builtins or name in defined:
+            if name in builtins or name in known:
                 continue
             # ignore les mots-cles suivis d'une parenthese
             if name in ("if", "while", "for", "return", "and", "or", "not", "function"):
