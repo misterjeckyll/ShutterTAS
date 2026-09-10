@@ -109,6 +109,12 @@ TAS_CONFIG = {
     -- (build -33). Coupes par defaut.
     reset_world_checks = false,
 
+    -- N part d'un monde recharge a l'etat du debut de la prise (build -36) :
+    -- B joint a la prise la sauvegarde du jeu, Keith et son delai depuis le
+    -- dernier chargement, sans rien recharger (faire F avant B pour
+    -- enregistrer depuis un monde remis).
+    rec_from_reset = true,
+
     -- key_hooks : DESACTIVE, et ce n'est pas un reglage de confort.
     --
     -- Les callbacks de RegisterKeyBind s'executent sur le thread
@@ -133,7 +139,7 @@ KEY_DISPLAY_FRAMES = 30
 -- Marqueur de version : loggue au chargement et affiche par F8.
 -- A incrementer a chaque modification, pour verifier que le jeu charge
 -- bien le fichier copie et non une version restee en place.
-TAS_BUILD = "2026-09-10-34"
+TAS_BUILD = "2026-09-10-36"
 
 TAS = {
     Frame = 0,
@@ -318,7 +324,9 @@ local DIAG = {
     ref_pose = false,    -- Keith complet au moment de C
     pending_pose = false, -- Keith a remettre apres le rechargement
     pending_label = false,
-    check_pose = false   -- pose remise, verifiee une seconde apres
+    check_pose = false,  -- pose remise, verifiee une seconde apres
+    rec_setup = false,   -- sauvegarde et pose a joindre a la prise, pour B depuis un reset
+    hud_status = false   -- ligne E pendant un demarrage differe, par exemple REC dans 3.2 s
 }
 
 -- Injection camera en PLAY (voir apply_camera et install_camera_hooks).
@@ -353,6 +361,8 @@ local world_tick
 local world_reference
 local world_mark_reset
 local reload_level
+local install_reset_hooks
+local reset_session
 
 --------------------------------------------------------
 -- ECRITURE DE TEXTE
@@ -1202,7 +1212,7 @@ local function update_event_text()
     end
 
     if not TAS_CONFIG.key_hooks and right == "" then
-        right = "B rec | N play"
+        right = DIAG.hud_status or "B rec | N play"
     end
 
     local line
@@ -2999,6 +3009,16 @@ local function save_recording(rec)
         string.format("    count = %d,", rec.count)
     }
 
+    -- Prise faite depuis un reset : de quoi recharger le meme monde.
+    if rec.save_hex then
+        out[#out + 1] = string.format("    start_offset = %d,", rec.start_offset or 0)
+        out[#out + 1] = string.format("    save_hex = %q,", rec.save_hex)
+    end
+
+    if rec.reset_pose then
+        out[#out + 1] = "    reset_pose = " .. lua_table(rec.reset_pose) .. ","
+    end
+
     if rec.pose then
         local parts = {}
         for _, key in ipairs({ "x", "y", "z", "pitch", "yaw", "roll",
@@ -3406,6 +3426,14 @@ local function start_recording()
         pose = capture_pose()
     }
 
+    -- B depuis un reset : sauvegarde du jeu, pose de Keith et delai.
+    if DIAG.rec_setup then
+        for key, value in pairs(DIAG.rec_setup) do
+            TAS.Rec[key] = value
+        end
+        DIAG.rec_setup = false
+    end
+
     TAS.RecStart = TAS.Frame
     TAS.RecLast = {}
     TAS.Mode = "rec"
@@ -3789,7 +3817,11 @@ end
 function recorder_tick()
 
     time_report()
-    world_tick()
+
+    -- world_tick rend true s'il vient de demarrer un REC ou un PLAY differe.
+    if world_tick() then
+        return
+    end
 
     local request = TAS.ModeRequest
 
@@ -3799,7 +3831,9 @@ function recorder_tick()
 
         if request == "rec" then
             if TAS.Mode == "idle" then
-                start_recording()
+                if not reset_session("rec") then
+                    start_recording()
+                end
                 return
             elseif TAS.Mode == "rec" then
                 stop_recording()
@@ -3807,7 +3841,9 @@ function recorder_tick()
             end
         elseif request == "play" then
             if TAS.Mode == "idle" then
-                start_replay()
+                if not reset_session("play") then
+                    start_replay()
+                end
                 return
             elseif TAS.Mode == "play" then
                 stop_replay("N")
@@ -5341,6 +5377,13 @@ function diag_tick()
     end
 end
 
+-- Module monde + resets dans un bloc : ses variables locales ne comptent plus
+-- dans la limite de Lua de 200 locales du fichier (build -35). Il n'expose
+-- que des fonctions declarees en tete de fichier (world_event, world_tick,
+-- world_reference, world_mark_reset, reload_level, install_reset_hooks,
+-- reset_session).
+do
+
 ----------------------------------------------------------
 -- ETAT DU MONDE : RELEVE (10/09, build -22)
 --
@@ -5672,6 +5715,18 @@ local RESET = {
     auto_pending = false,
     auto_min = 280,
     auto_max = 4200,
+    -- B / N depuis un reset (build -35) : demarrage a start_offset frames du
+    -- chargement, apres l'intro (~250 frames) et au-dela des 700 frames sans
+    -- releve du monde.
+    start_offset = 720,
+    offset_now = 720,
+    -- Build -36 : B ne recharge plus, il note son delai depuis le dernier
+    -- chargement ; N rejoue au meme delai s'il est dans [min, max], sinon
+    -- au delai standard.
+    min_offset = 300,             -- apres l'intro acceleree, soit ~250 frames
+    max_offset = 4200,            -- au-dela de 30 s, attendre n'a plus de sens
+    pending_start = false,        -- "rec" ou "play" en attente du chargement
+    start_load = false,           -- TAS.Frame du chargement qui compte
     info_count = {},
     installed = false
 }
@@ -5752,6 +5807,15 @@ function SAVE.checksum(data)
     return string.format("%08x", sum)
 end
 
+-- La sauvegarde est binaire : stockee en hexadecimal dans le fichier de prise.
+function SAVE.to_hex(data)
+    return (data:gsub(".", function(c) return string.format("%02x", c:byte()) end))
+end
+
+function SAVE.from_hex(hex)
+    return (hex:gsub("..", function(pair) return string.char(tonumber(pair, 16)) end))
+end
+
 function SAVE.find()
 
     if SAVE.path then return SAVE.path end
@@ -5794,6 +5858,13 @@ function SAVE.restore()
         return false
     end
 
+    return SAVE.put(data, "avant rechargement")
+end
+
+-- Ecrit data dans la vraie sauvegarde du jeu, en gardant d'abord celle du
+-- moment (SaveSlot0_avant_F.sav). Rend true si elle est relue identique.
+function SAVE.put(data, reason)
+
     local path = SAVE.find()
 
     if not path then return false end
@@ -5816,7 +5887,7 @@ function SAVE.restore()
 
     local back = SAVE.read(path)
 
-    log(string.format("SAVE remise avant rechargement : empreinte %s -> %s, %s",
+    log(string.format("SAVE remise %s : empreinte %s -> %s, %s", reason,
         before, SAVE.checksum(data), back == data and "relue identique" or "RELECTURE DIFFERENTE"))
 
     return back == data
@@ -5980,6 +6051,9 @@ function world_mark_reset(source)
         DIAG.last_load_frame = TAS.Frame
         DIAG.reset_frame = TAS.Frame
         -- Chargement provoque par F / Shift+F : on saute les cinematiques.
+        if RESET.pending_start then
+            RESET.start_load = TAS.Frame
+        end
         if DIAG.pending_pose then
             RESET.window_start = TAS.Frame
             RESET.window_until = TAS.Frame + RESET.window
@@ -6029,6 +6103,35 @@ function world_tick()
             RESET.fast = {}
             RESET.pose = false
             log("INTRO : fin de la fenetre de saut des cinematiques")
+        end
+    end
+
+    -- B / N depuis un reset : demarrage a offset_now frames du chargement.
+    if RESET.pending_start then
+        if RESET.start_load then
+            local since = TAS.Frame - RESET.start_load
+            DIAG.hud_status = string.format("%s dans %.1f s",
+                RESET.pending_start == "rec" and "REC" or "PLAY",
+                math.max(RESET.offset_now - since, 0) / 140)
+            if since >= RESET.offset_now then
+                local kind = RESET.pending_start
+                RESET.pending_start = false
+                DIAG.hud_status = false
+                -- Plus aucune cinematique touchee pendant la prise, et plus
+                -- de controles « apres reset » dans le log.
+                RESET.window_until = false
+                RESET.fast = {}
+                RESET.pose = false
+                DIAG.reset_frame = false
+                log(string.format("%s demarre %d frames apres le chargement | Keith %s",
+                    kind == "rec" and "REC" or "PLAY", since, keith_position_text()))
+                if kind == "rec" then
+                    start_recording()
+                else
+                    start_replay()
+                end
+                return true
+            end
         end
     end
 
@@ -6146,9 +6249,9 @@ function reload_level(with_position)
         DIAG.pending_label = "etat, Keith garde sa position"
     end
 
-    if TAS.Mode ~= "idle" then
+    if TAS.Mode ~= "idle" or RESET.pending_start then
         DIAG.pending_pose = false
-        log("Rechargement refuse pendant un REC ou un PLAY")
+        log("Rechargement refuse pendant un REC, un PLAY ou un demarrage differe")
         return
     end
 
@@ -6164,20 +6267,126 @@ function reload_level(with_position)
         log("SAVE : rechargement quand meme, depuis la sauvegarde actuelle")
     end
 
+    RESET.open_level(pawn, with_position and "touche Shift+F" or "touche F")
+end
+
+-- OpenLevel du niveau courant. Rend true si la demande est partie.
+function RESET.open_level(pawn, source)
+
     local ok, err = pcall(function()
         local library = StaticFindObject("/Script/Engine.Default__GameplayStatics")
         local level = library:GetCurrentLevelName(pawn, true)
         local name = type(level) == "string" and level or level:ToString()
-        log("RECHARGEMENT du niveau " .. name .. " (touche F) | Keith " .. keith_position_text())
+        log("RECHARGEMENT du niveau " .. name .. " (" .. source .. ") | Keith " .. keith_position_text())
         library:OpenLevel(pawn, FName(name), true, "")
     end)
 
     if not ok then
         log("Rechargement impossible : " .. tostring(err))
     end
+
+    return ok
 end
 
-local function install_reset_hooks()
+-- N depuis un monde recharge (build -35, revu au -36 a la demande de
+-- l'utilisateur : B ne recharge plus).
+--   B : REC tout de suite ; joint a la prise la sauvegarde actuelle, Keith et
+--       le delai depuis le dernier chargement. Pour partir d'un monde remis,
+--       faire F avant B.
+--   N : ecrit la sauvegarde de la prise, recharge, replace Keith, puis
+--       demarre le PLAY a ce meme delai apres le chargement.
+-- Rend true si la demande est prise en charge (N differe, ou annulation) ;
+-- false = REC / PLAY classique, tout de suite.
+function reset_session(kind)
+
+    -- Rappuyer sur B ou N pendant l'attente annule le demarrage.
+    if RESET.pending_start then
+        RESET.pending_start = false
+        DIAG.rec_setup = false
+        DIAG.hud_status = false
+        log("Demarrage depuis un reset annule")
+        return true
+    end
+
+    if not TAS_CONFIG.rec_from_reset or TAS.Mode ~= "idle" then return false end
+
+    local pawn = get_player_pawn()
+
+    if not pawn then return false end
+
+    local pose
+
+    if kind == "rec" then
+
+        local path = SAVE.find()
+        local data = path and SAVE.read(path)
+
+        pose = capture_pose()
+
+        if not data or not pose then
+            log("REC depuis un reset impossible (sauvegarde ou Keith illisible) : REC classique")
+            return false
+        end
+
+        -- Build -36 : B ne recharge pas (pour partir d'un monde remis, faire F
+        -- avant B). Il joint la sauvegarde, Keith et son delai depuis le
+        -- dernier chargement ; N rechargera et rejouera au meme delai.
+        local since = DIAG.last_load_frame and (TAS.Frame - DIAG.last_load_frame) or nil
+        local exact = since ~= nil and since <= RESET.max_offset
+        local offset = exact and math.max(since, RESET.min_offset) or RESET.start_offset
+
+        DIAG.rec_setup = {
+            save_hex = SAVE.to_hex(data),
+            reset_pose = pose,
+            start_offset = offset
+        }
+
+        log(string.format("REC : sauvegarde et Keith joints a la prise ; N rechargera et rejouera %d frames apres le chargement%s",
+            offset, exact and " (meme delai que ce REC depuis le dernier chargement)"
+                or " (delai standard : dernier chargement trop ancien, les elements animes du monde pourront differer)"))
+
+        -- REC classique, tout de suite : start_recording joint rec_setup.
+        return false
+    else
+
+        local rec = TAS.Rec or load_recording()
+
+        if not rec or not rec.save_hex or not rec.events or not rec.events[0] then
+            return false
+        end
+
+        if not SAVE.put(SAVE.from_hex(rec.save_hex), "avant le rejeu") then
+            log("PLAY depuis un reset impossible (ecriture de la sauvegarde) : PLAY classique")
+            return false
+        end
+
+        TAS.Rec = rec
+        pose = rec.reset_pose or rec.pose
+        RESET.offset_now = rec.start_offset or RESET.start_offset
+    end
+
+    RESET.auto_pending = false
+    RESET.pending_start = kind
+    RESET.start_load = false
+    DIAG.pending_pose = pose
+    DIAG.pending_label = kind == "rec" and "debut d'enregistrement" or "debut du rejeu"
+    DIAG.hud_status = "chargement..."
+
+    log(string.format("%s depuis un reset : rechargement, demarrage %d frames apres le chargement",
+        kind == "rec" and "REC" or "PLAY", RESET.offset_now))
+
+    if not RESET.open_level(pawn, kind == "rec" and "touche B" or "touche N") then
+        RESET.pending_start = false
+        DIAG.pending_pose = false
+        DIAG.rec_setup = false
+        DIAG.hud_status = false
+        return false
+    end
+
+    return true
+end
+
+function install_reset_hooks()
 
     if RESET.installed then return end
     RESET.installed = true
@@ -6221,6 +6430,8 @@ local function install_reset_hooks()
 
     log("Hook MovieSceneSequencePlayer:Play " .. (ok and "installe" or ("absent : " .. tostring(err))))
 end
+
+end -- fin du module monde + resets
 
 local ActionHooksInstalled = false
 
